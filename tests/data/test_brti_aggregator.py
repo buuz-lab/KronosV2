@@ -68,25 +68,11 @@ async def test_drain_emits_composite_price_per_tick():
     await in_q.put(fresh_tick("coinbase", 100.0, 1000.0))
     await in_q.put(fresh_tick("kraken",   200.0, 1000.0))
 
-    # Process exactly 2 ticks through the real _drain, then cancel
-    async def drain_two():
-        count = 0
-
-        async def counting_drain(q):
-            nonlocal count
-            while count < 2:
-                tick = await q.get()
-                agg._latest[tick.exchange] = tick
-                price = agg._cf_benchmarks_source()
-                if price is None:
-                    price = agg._composite()
-                if price is not None:
-                    await agg._out_queue.put(price)
-                count += 1
-
-        await counting_drain(in_q)
-
-    await asyncio.wait_for(drain_two(), timeout=1.0)
+    # _drain runs forever; timeout after it consumes both queued ticks and blocks
+    try:
+        await asyncio.wait_for(agg._drain(in_q), timeout=0.5)
+    except asyncio.TimeoutError:
+        pass  # expected — drain blocked waiting for a third tick
 
     assert agg.out_queue.qsize() == 2
     first = await agg.out_queue.get()

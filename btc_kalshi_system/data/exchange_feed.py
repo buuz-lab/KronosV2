@@ -7,7 +7,7 @@ import websockets
 from loguru import logger
 
 from btc_kalshi_system.data.models import Tick
-from config import RECONNECT_DELAYS
+from config import BITSTAMP_WS_URL, COINBASE_WS_URL, KRAKEN_WS_URL, RECONNECT_DELAYS
 
 
 class ExchangeFeed(ABC):
@@ -60,7 +60,7 @@ class CoinbaseFeed(ExchangeFeed):
 
     @property
     def ws_url(self) -> str:
-        return "wss://advanced-trade-api.coinbase.com/ws/public"
+        return COINBASE_WS_URL
 
     def subscribe_message(self) -> dict:
         return {"type": "subscribe", "channel": "ticker", "product_ids": ["BTC-USD"]}
@@ -90,7 +90,7 @@ class KrakenFeed(ExchangeFeed):
 
     @property
     def ws_url(self) -> str:
-        return "wss://ws.kraken.com/v2"
+        return KRAKEN_WS_URL
 
     def subscribe_message(self) -> dict:
         return {
@@ -121,7 +121,7 @@ class BitstampFeed(ExchangeFeed):
 
     @property
     def ws_url(self) -> str:
-        return "wss://ws.bitstamp.net"
+        return BITSTAMP_WS_URL
 
     def subscribe_message(self) -> dict:
         return {"event": "bts:subscribe", "data": {"channel": "live_trades_btcusd"}}
@@ -134,6 +134,8 @@ class BitstampFeed(ExchangeFeed):
             if msg.get("channel") != "live_trades_btcusd":
                 return None
             data = msg.get("data") or {}
+            if not data:
+                return None
             return Tick(
                 exchange="bitstamp",
                 price=float(data["price"]),
