@@ -17,10 +17,16 @@ class Calibrator:
     def __init__(self) -> None:
         self._iso: IsotonicRegression | None = None
         self._passthrough: bool = True
+        self._n_samples: int = 0
+
+    @property
+    def n_samples(self) -> int:
+        return self._n_samples
 
     def fit(self, raw_probs: np.ndarray, outcomes: np.ndarray) -> "Calibrator":
         raw_probs = np.asarray(raw_probs, dtype=float)
         outcomes = np.asarray(outcomes, dtype=float)
+        self._n_samples = len(raw_probs)
         if len(raw_probs) < _MIN_SAMPLES:
             self._passthrough = True
             return self
@@ -42,7 +48,7 @@ class Calibrator:
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        joblib.dump({"iso": self._iso, "passthrough": self._passthrough}, path)
+        joblib.dump({"iso": self._iso, "passthrough": self._passthrough, "n_samples": self._n_samples}, path)
 
     @classmethod
     def load(cls, path: str) -> "Calibrator":
@@ -52,4 +58,5 @@ class Calibrator:
         obj = cls.__new__(cls)
         obj._iso = state["iso"]
         obj._passthrough = state["passthrough"]
+        obj._n_samples = state.get("n_samples", 0)
         return obj
