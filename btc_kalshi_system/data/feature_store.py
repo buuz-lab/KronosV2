@@ -35,6 +35,26 @@ class FeatureStore:
     def __init__(self, redis_url: str = REDIS_URL) -> None:
         self._tick_buffer: deque[tuple[float, float]] = deque(maxlen=BRTI_TICK_BUFFER_SIZE)
         self._redis = redis.from_url(redis_url)
+        self._load_tick_buffer_from_redis()
+
+    def _load_tick_buffer_from_redis(self) -> None:
+        """Reload tick history from Redis on startup so restarts don't lose accumulated candles."""
+        try:
+            raw = self._redis.lrange("brti:ticks", 0, -1)
+            if not raw:
+                return
+            # brti:ticks is newest-first; _tick_buffer must be oldest-first
+            entries = []
+            for entry in reversed(raw):
+                try:
+                    ts_str, price_str = entry.decode().split(":", 1)
+                    entries.append((float(ts_str), float(price_str)))
+                except (ValueError, AttributeError):
+                    continue
+            self._tick_buffer.extend(entries)
+            logger.info(f"FeatureStore: reloaded {len(entries)} ticks from Redis on startup")
+        except Exception as exc:
+            logger.warning(f"FeatureStore: could not reload tick buffer from Redis — {exc}")
 
     # ── Async writer ───────────────────────────────────────────────────────
 

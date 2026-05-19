@@ -5,7 +5,7 @@ load_dotenv()
 
 REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
 
-BRTI_TICK_BUFFER_SIZE: int = 7200          # 2 hours at ~1 tick/second
+BRTI_TICK_BUFFER_SIZE: int = 150_000  # ~42 hours at 1 tick/second
 BRTI_STALE_THRESHOLD_SECONDS: float = 5.0  # exclude exchange ticks older than this
 BRTI_RESOLUTION_WINDOW_SECONDS: int = 60   # rolling window for resolution estimate
 RECONNECT_DELAYS: list[int] = [1, 2, 4, 8, 16, 32, 60]
