@@ -10,7 +10,7 @@ BRTI_STALE_THRESHOLD_SECONDS: float = 5.0  # exclude exchange ticks older than t
 BRTI_RESOLUTION_WINDOW_SECONDS: int = 60   # rolling window for resolution estimate
 RECONNECT_DELAYS: list[int] = [1, 2, 4, 8, 16, 32, 60]
 
-COINBASE_WS_URL: str = "wss://advanced-trade-api.coinbase.com/ws/public"
+COINBASE_WS_URL: str = "wss://advanced-trade-ws.coinbase.com"
 KRAKEN_WS_URL: str = "wss://ws.kraken.com/v2"
 BITSTAMP_WS_URL: str = "wss://ws.bitstamp.net"
 
