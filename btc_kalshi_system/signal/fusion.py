@@ -121,9 +121,9 @@ class SignalFusionEngine:
             vol = 0.0
         return {
             "funding_rate": float(ctx.get("funding_rate", 0.0)),
-            "funding_rate_trend": float(ctx.get("funding_trend", 0.0)),
-            "oi_delta_pct": float(ctx.get("oi_delta", 0.0)),
+            "funding_rate_trend": float(ctx.get("funding_rate_trend", 0.0)),
+            "oi_delta_pct": float(ctx.get("oi_delta_pct", 0.0)),
             "cvd_normalized": float(ctx.get("cvd_normalized", 0.0)),
-            "basis_spread_pct": float(ctx.get("basis_spread", 0.0)),
+            "basis_spread_pct": float(ctx.get("basis_spread_pct", 0.0)),
             "brti_volatility_1h": vol,
         }

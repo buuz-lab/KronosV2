@@ -12,7 +12,7 @@ from loguru import logger
 
 from btc_kalshi_system.data.brti_aggregator import BRTIAggregator
 from btc_kalshi_system.data.derivatives_feed import DerivativesFeed
-from btc_kalshi_system.data.exchange_feed import BitstampFeed, CoinbaseFeed, KrakenFeed
+from btc_kalshi_system.data.exchange_feed import BitstampFeed, CoinbaseFeed, GeminiFeed, KrakenFeed
 from btc_kalshi_system.data.feature_store import FeatureStore
 from btc_kalshi_system.execution.kelly import KellySizer
 from btc_kalshi_system.execution.pretrade_checklist import PreTradeChecklist
@@ -109,15 +109,16 @@ class KronosV2:
         self._running = True
         logger.info("KronosV2 starting up")
 
-        queues = [asyncio.Queue() for _ in range(3)]
+        queues = [asyncio.Queue() for _ in range(4)]
         agg = BRTIAggregator()
-        feeds = [CoinbaseFeed(), KrakenFeed(), BitstampFeed()]
+        feeds = [CoinbaseFeed(), KrakenFeed(), BitstampFeed(), GeminiFeed()]
         deriv = DerivativesFeed()
 
         await asyncio.gather(
             feeds[0].run(queues[0]),
             feeds[1].run(queues[1]),
             feeds[2].run(queues[2]),
+            feeds[3].run(queues[3]),
             agg.run(queues),
             self._store.run(agg.out_queue),
             deriv.run(),
