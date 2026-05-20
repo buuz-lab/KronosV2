@@ -39,11 +39,9 @@ logger.add("logs/kronos_{time}.log", rotation="1 day", retention="30 days", leve
 SIGNAL_INTERVAL_SECONDS = 300
 DEEPSEEK_REFRESH_SECONDS = 900
 RECOVERY_INTERVAL_SECONDS = 3600
-RESOLUTION_BLACKOUT_MINUTES = 15
 
-# KXBTC resolves at 6:30 PM EDT (UTC-4 during DST) = 22:30 UTC
-RESOLUTION_TIMES_EDT = [(18, 30)]
-_EDT_OFFSET_HOURS = 4  # EDT = UTC-4
+# Per-market blackout: stop new entries this many seconds before close_time
+_BLACKOUT_SECONDS = {"15min": 3 * 60, "1h": 10 * 60}
 
 # ── SQLite schema ─────────────────────────────────────────────────────────────
 
@@ -190,8 +188,8 @@ class KronosV2:
             return
 
         # a. Resolution blackout
-        if self._is_in_blackout():
-            logger.info(f"In resolution blackout — skipping {ticker}")
+        if self._market_is_in_blackout(market):
+            logger.info(f"Too close to close_time — skipping {ticker}")
             return
 
         # b. Strike from market data
@@ -288,19 +286,22 @@ class KronosV2:
 
     # ── Helper methods ────────────────────────────────────────────────────────
 
-    def _is_in_blackout(self) -> bool:
-        now_utc = datetime.now(timezone.utc)
-        blackout_seconds = RESOLUTION_BLACKOUT_MINUTES * 60
-        for hour_edt, minute_edt in RESOLUTION_TIMES_EDT:
-            # Convert EDT → UTC
-            hour_utc = (hour_edt + _EDT_OFFSET_HOURS) % 24
-            resolution_today = now_utc.replace(
-                hour=hour_utc, minute=minute_edt, second=0, microsecond=0
-            )
-            delta = (resolution_today - now_utc).total_seconds()
-            if 0 <= delta <= blackout_seconds:
-                return True
-        return False
+    def _market_is_in_blackout(self, market: dict) -> bool:
+        """Return True if we are too close to this market's close_time to enter a new position."""
+        close_time_str = market.get("close_time")
+        if not close_time_str:
+            return False
+        try:
+            close_dt = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+            seconds_until_close = (close_dt - datetime.now(timezone.utc)).total_seconds()
+            if seconds_until_close < 0:
+                return True  # market already closed
+            market_type = market.get("market_type", "15min")
+            threshold = _BLACKOUT_SECONDS.get(market_type, 3 * 60)
+            return seconds_until_close <= threshold
+        except (ValueError, TypeError) as exc:
+            logger.debug(f"Could not parse close_time '{close_time_str}': {exc}")
+            return False
 
     def _get_market_context(self) -> dict:
         try:
