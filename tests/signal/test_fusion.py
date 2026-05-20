@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from btc_kalshi_system.models.regime_model import NotTrainedError
-from btc_kalshi_system.signal.fusion import SignalFusionEngine, TradingSignal
+from btc_kalshi_system.signal.fusion import _BOOTSTRAP_SHRINK, SignalFusionEngine, TradingSignal
 
 
 # ── Test fixture helpers ───────────────────────────────────────────────────────
@@ -176,10 +176,10 @@ def test_trending_up_regime_no_shrinkage():
 # ── NotTrainedError fallback ───────────────────────────────────────────────────
 
 def test_not_trained_uses_kronos_only_formula():
-    """combined = 0.5 + (kronos_cal - 0.5) * 0.5"""
+    """combined = 0.5 + (kronos_cal - 0.5) * _BOOTSTRAP_SHRINK"""
     engine = make_engine(kronos_cal=0.70, raise_not_trained=True)
     result = engine.get_signal("5min", 76000.0)
-    expected = 0.5 + (0.70 - 0.5) * 0.5   # 0.60
+    expected = 0.5 + (0.70 - 0.5) * _BOOTSTRAP_SHRINK
     assert result is not None
     assert result.calibrated_prob == pytest.approx(expected)
 
@@ -187,7 +187,7 @@ def test_not_trained_uses_kronos_only_formula():
 def test_not_trained_kronos_below_half():
     engine = make_engine(kronos_cal=0.30, raise_not_trained=True)
     result = engine.get_signal("5min", 76000.0)
-    expected = 0.5 + (0.30 - 0.5) * 0.5   # 0.40
+    expected = 0.5 + (0.30 - 0.5) * _BOOTSTRAP_SHRINK
     assert result is not None
     assert result.calibrated_prob == pytest.approx(expected)
 
