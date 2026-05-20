@@ -93,7 +93,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi. The system trad
 
 - **Kronos MUST be preloaded in `KronosV2.__init__()`** — never load it inside `asyncio.to_thread()` or any async context on Apple Silicon. The `preload()` method handles the safe loading path. This is the single most important rule in this codebase for macOS.
 - **torch 2.12.0 on Apple Silicon** — MPS is available but causes segfaults in the Kronos inference path. `map_location="cpu"` + `set_num_threads(1)` + preload-before-asyncio is the triple fix that works.
-- **DeepSeek credits** — key `sk-41a0ee36dfc042168a1bdfe3f200e5cd` is active but has $0 balance. System trades without it (neutral fallback). Add credits at platform.deepseek.com.
+- **DeepSeek credits** — key is in `.env` as `DEEPSEEK_API_KEY`. Currently $0 balance; system trades without it (neutral fallback). Add credits at platform.deepseek.com.
 - **Bybit geo-blocked** for US users (HTTP 403 CloudFront). OKX is now the primary derivatives exchange; if OKX also blocks, the feed silently writes zero-valued regime features and the system continues.
 - **RSA-PSS signing** (not PKCS1v15) for Kalshi auth; sign path-only, strip query string at `?`; base URL `https://api.elections.kalshi.com`
 - **15-min market bootstrap math**: KXBTC 15-min markets resolve every 15 minutes. With ~10–30 active markets at any time, expect 10–30 resolved paper trades per 15-min window, or ~960–2880 per day. Bootstrap to 500 should take less than 1 day if Gate 5 passes consistently.

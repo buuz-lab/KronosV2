@@ -45,14 +45,23 @@ class PreTradeChecklist:
             return fail(1, f"Spread ${spread_dollars:.3f} exceeds $0.03 limit")
 
         # Gate 2 — Depth check (also computes kelly for final result)
-        market_price = best_ask_cents / 100
+        # "yes" trades pay ask_cents; "no" trades pay (100 - bid_cents).
+        # Kelly and contract sizing must use the actual price being paid and the
+        # correct win probability for each direction.
+        if signal.direction == 1:
+            win_prob = signal.calibrated_prob
+            trade_price_cents = best_ask_cents
+        else:
+            win_prob = 1.0 - signal.calibrated_prob
+            trade_price_cents = 100 - best_bid_cents
+        market_price = trade_price_cents / 100
         kelly_dollars = self._kelly.compute_size(
-            prob=signal.calibrated_prob,
+            prob=win_prob,
             market_price=market_price,
             current_exposure=current_exposure,
             same_timeframe_open=same_timeframe_open,
         )
-        kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, best_ask_cents)
+        kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
 
         if kelly_contracts == 0:
             return fail(2, "Kelly size rounds to 0 contracts")
@@ -69,7 +78,9 @@ class PreTradeChecklist:
             return fail(4, "Rolling realized edge below threshold")
 
         # Gate 5 — Signal edge vs spread check
-        signal_edge = signal.calibrated_prob - (best_ask_cents / 100)
+        # For "yes": edge = P(up) - ask_price
+        # For "no":  edge = P(down) - no_price = (1 - P(up)) - (1 - bid_price) = bid_price - P(up)
+        signal_edge = win_prob - market_price
         min_required = spread_dollars + 0.005
         if signal_edge <= min_required:
             return fail(5, f"Signal edge {signal_edge:.4f} does not exceed spread + 0.005 ({min_required:.4f})")

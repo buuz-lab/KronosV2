@@ -11,8 +11,13 @@ Combined probability formula (when both models available):
         combined = 0.5 + (combined - 0.5) * 0.5
 
 When RegimeModel raises NotTrainedError (regime model not yet trained):
-    combined = 0.5 + (kronos_calibrated - 0.5) * 0.5
+    combined = 0.5 + (kronos_calibrated - 0.5) * _BOOTSTRAP_SHRINK  (0.8, not 0.5)
     Gate 2 is bypassed — trading is allowed with conservative Kronos-only signal.
+
+Note: _BOOTSTRAP_SHRINK (0.8) is intentionally lighter than _UNCERTAINTY_SHRINK (0.5).
+During bootstrap the regime model is simply untrained — that is different from
+DeepSeek signalling genuine high uncertainty. A 50% shrink was preventing Gate 5
+from passing during bootstrap, stalling trade accumulation indefinitely.
 """
 
 import math
@@ -28,7 +33,8 @@ from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
 _KRONOS_WEIGHT = 0.6
 _REGIME_WEIGHT = 0.4
-_UNCERTAINTY_SHRINK = 0.5
+_UNCERTAINTY_SHRINK = 0.5   # applied when DeepSeek signals high_uncertainty
+_BOOTSTRAP_SHRINK = 0.8     # applied when RegimeModel is untrained (bootstrap phase)
 
 
 @dataclass
@@ -94,10 +100,15 @@ class SignalFusionEngine:
                 combined = 0.5 + (combined - 0.5) * _UNCERTAINTY_SHRINK
 
         except NotTrainedError:
-            # Regime model not yet trained — Kronos-only with conservative shrink
+            # Regime model not yet trained — Kronos-only with a lighter bootstrap shrink.
+            # Use _BOOTSTRAP_SHRINK (0.8) here, NOT _UNCERTAINTY_SHRINK (0.5).
+            # The regime being untrained is a data-scarcity issue, not a signal of
+            # high market uncertainty. Using 0.5 shrink compressed signals so much that
+            # Gate 5 almost never passed during bootstrap, creating a deadlock where
+            # no paper trades were placed and the calibrator could never train.
             regime_prob = math.nan
             regime_direction = -1
-            combined = 0.5 + (kronos_cal - 0.5) * _UNCERTAINTY_SHRINK
+            combined = 0.5 + (kronos_cal - 0.5) * _BOOTSTRAP_SHRINK
 
         direction = 1 if combined >= 0.5 else 0
 

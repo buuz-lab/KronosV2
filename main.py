@@ -257,9 +257,11 @@ class KronosV2:
         # h. Place order (or simulate in paper mode)
         trade_id = str(uuid.uuid4())
         side = "yes" if signal.direction == 1 else "no"
+        # "yes" contracts cost ask_cents; "no" contracts cost (100 - bid_cents).
+        fill_price_cents = best_ask_cents if signal.direction == 1 else (100 - best_bid_cents)
         if config.PAPER_TRADING:
             logger.info(
-                f"[PAPER] Simulated fill: {ticker} {side} {result.kelly_contracts}@{best_ask_cents}¢ "
+                f"[PAPER] Simulated fill: {ticker} {side} {result.kelly_contracts}@{fill_price_cents}¢ "
                 f"(${result.kelly_dollars:.2f} kelly) trade_id={trade_id}"
             )
         else:
@@ -268,11 +270,11 @@ class KronosV2:
                     ticker=ticker,
                     side=side,
                     count=result.kelly_contracts,
-                    price_cents=best_ask_cents,
+                    price_cents=fill_price_cents,
                     client_order_id=trade_id,
                 )
                 logger.info(
-                    f"Order placed: {ticker} {side} {result.kelly_contracts}@{best_ask_cents}¢ "
+                    f"Order placed: {ticker} {side} {result.kelly_contracts}@{fill_price_cents}¢ "
                     f"(${result.kelly_dollars:.2f} kelly) trade_id={trade_id}"
                 )
             except Exception as exc:
@@ -287,7 +289,7 @@ class KronosV2:
             direction=signal.direction,
             strike=strike,
             contracts=result.kelly_contracts,
-            entry_price_cents=best_ask_cents,
+            entry_price_cents=fill_price_cents,
             kelly_dollars=result.kelly_dollars,
             timestamp=time.time(),
             calibrated_prob=signal.calibrated_prob,
@@ -295,7 +297,7 @@ class KronosV2:
         self._monitor.add_position(position)
 
         # j. Log to SQLite
-        self._record_trade_sqlite(trade_id, signal, result, ticker, best_ask_cents)
+        self._record_trade_sqlite(trade_id, signal, result, ticker, fill_price_cents)
 
     # ── Helper methods ────────────────────────────────────────────────────────
 
@@ -441,9 +443,26 @@ class KronosV2:
         except sqlite3.Error as exc:
             logger.error(f"SQLite insert failed for {trade_id}: {exc}")
 
+    _MAX_POSITION_AGE_SECONDS: float = 86400.0  # 24 hours
+
     def _check_resolutions(self) -> None:
         for position in self._monitor.get_open_positions():
             try:
+                # Age-out: if a position has been open for more than 24 hours without
+                # resolving (e.g. API field names changed, market never finalized),
+                # remove it from the monitor so it doesn't block new same-timeframe
+                # trades or accumulate forever. We do NOT write an outcome to SQLite —
+                # keeping outcome=NULL means these won't pollute calibrator training data.
+                age_seconds = time.time() - position.timestamp
+                if age_seconds > self._MAX_POSITION_AGE_SECONDS:
+                    logger.warning(
+                        f"Aging out stale position {position.ticker} "
+                        f"trade_id={position.trade_id} "
+                        f"(open for {age_seconds / 3600:.1f}h with no resolution)"
+                    )
+                    self._monitor.remove_position(position.trade_id)
+                    continue
+
                 resp = self._router._raw._request(
                     "GET", f"/trade-api/v2/markets/{position.ticker}"
                 )
