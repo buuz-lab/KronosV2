@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from loguru import logger
+
 from btc_kalshi_system.data.feature_store import FeatureStore
 from btc_kalshi_system.models.calibrator import Calibrator
 from btc_kalshi_system.models.deepseek_parser import DeepSeekContextParser
