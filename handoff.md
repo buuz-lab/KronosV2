@@ -8,15 +8,17 @@ Bootstrap a live BTC prediction-market trading system on Kalshi. The system trad
 
 ## Current Progress
 
-**All known gate blockers are fixed. trades.db was at 0 trades when the last session ended — the Gate 6 fix (skip for KXBTC15M) was the final blocker and was committed/pushed. After restarting, KXBTC15M paper trades should begin flowing.**
+**All known signal-correctness bugs are fixed. Latest fix: KXBTC15M reference price — `_extract_strike()` now calls `_get_15min_reference_price()` which walks the 15-min OHLCV to the last completed candle instead of using the live 5-min close. A restart is required to pick this up (commit 4c3b1eb).**
 
 - `PAPER_TRADING=true` in `.env`
 - Redis live with 7200+ ticks and 400+ completed 5-min candles
 - Kronos model loaded cleanly to CPU before asyncio starts
 - DeepSeek working: `suppress=False, regime=ranging`
-- Gate 6 now skipped for `timeframe == "15min"` — this was the last blocker
+- Gate 6 skipped for `timeframe == "15min"` (no proximity gate for up/down markets)
+- KXBTC15M strike = last completed 15-min BRTI candle close (not live 5-min close)
 - KXBTCD markets will always fail Kelly Gate 2 (correct behavior — wrong instrument for 5-min Kronos, see Gotchas)
 - Orderbook parser updated for new Kalshi `orderbook_fp` format
+- Test suite: 197 pass, 0 fail
 - **Verify fills after restart**: `while true; do sqlite3 ~/Kronos\ V2/trades.db "SELECT COUNT(*) total, SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END) resolved FROM trades;"; sleep 30; done`
 
 **Bootstrap counters needed before going live:**
@@ -53,6 +55,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi. The system trad
   ```
 - **KXBTCD instrument mismatch confirmed (this session)**: Kronos predicts 5-min BTC close. KXBTCD markets have strikes $79K–$83K+ while BTC was ~$76,700. `P(close > $79K in 5 min) ≈ 0.0` → Kelly = 0 → Gate 2 fails with "Kelly size rounds to 0 contracts." This is **correct behavior, not a bug**. KXBTCD is the wrong instrument for a 5-min forecaster. Focus exclusively on KXBTC15M markets.
 - **CircuitBreaker `paper_trading` constructor injection**: `check()` was reading `config.PAPER_TRADING` at call time, so `_check_rolling_edge` and `_check_calibrator` were skipped whenever `.env` had `PAPER_TRADING=true`. Added `paper_trading: bool | None = None` to `__init__`; resolves once at construction (`self._paper_trading`). Tests pass `paper_trading=False` explicitly so live-mode checks always run regardless of env. `main.py` passes no argument and continues to read `config.PAPER_TRADING`.
+- **KXBTC15M reference price fix**: `_extract_strike()` was falling back to `_get_composite_price()` (live 5-min close) for 15-min up/down markets. KXBTC15M resolves "yes" if BRTI at resolution > BRTI at market open, where market open = close of the last completed 15-min candle. Mid-window drift (e.g. +$300 in the first 10 min) caused Kronos to compute P(direction) against the wrong reference, potentially producing the wrong trade direction entirely. Fixed: added `_get_15min_reference_price()` which walks the 15-min OHLCV backwards past any in-progress candle to the most recent completed one. `_extract_strike()` calls this for `market_type == "15min"` before falling back to composite price.
 
 ---
 
@@ -82,9 +85,9 @@ Bootstrap a live BTC prediction-market trading system on Kalshi. The system trad
 | File | Change |
 |------|--------|
 | `btc_kalshi_system/execution/pretrade_checklist.py` | Gate 2 (Kelly) and Gate 5 now direction-aware: "no" trades use `win_prob = 1 - calibrated_prob` and `trade_price = 100 - bid_cents`; **Gate 6 now skipped for `timeframe == "15min"`** (final blocker fix) |
-| `btc_kalshi_system/signal/fusion.py` | `_BOOTSTRAP_SHRINK = 0.8` for `NotTrainedError` path (was `_UNCERTAINTY_SHRINK = 0.5`); added `from loguru import logger`; Gate 1 now logs suppress reason + notes at WARNING |
+| `btc_kalshi_system/signal/fusion.py` | `_BOOTSTRAP_SHRINK = 0.8` for `NotTrainedError` path (was `_UNCERTAINTY_SHRINK = 0.5`); added `from loguru import logger`; Gate 1 now logs suppress reason + notes at WARNING; **updated comment before `run_monte_carlo` to document 15-min reference price contract** |
 | `btc_kalshi_system/models/deepseek_parser.py` | Fixed `_build_prompt` key names (`funding_rate_trend`, `oi_delta_pct`, `basis_spread_pct`); rewrote suppress_trading prompt rules to clarify suppress is for extraordinary events only |
-| `main.py` | `fill_price_cents` is direction-aware (`best_ask_cents` for yes, `100 - best_bid_cents` for no); 24h age-out in `_check_resolutions` via `monitor.remove_position()`; fixed decimal strike parsing (`.isdigit()` → `try: float()`); **`_parse_orderbook` fully rewritten to handle new `orderbook_fp` format** |
+| `main.py` | `fill_price_cents` is direction-aware (`best_ask_cents` for yes, `100 - best_bid_cents` for no); 24h age-out in `_check_resolutions` via `monitor.remove_position()`; fixed decimal strike parsing (`.isdigit()` → `try: float()`); **`_parse_orderbook` fully rewritten to handle new `orderbook_fp` format**; **added `_get_15min_reference_price()` and updated `_extract_strike()` to use last completed 15-min BRTI candle close for `market_type == "15min"` markets** |
 | `btc_kalshi_system/portfolio/circuit_breaker.py` | Added `paper_trading: bool \| None = None` to `__init__`; resolved to `self._paper_trading` at construction; `check()` now uses `self._paper_trading` instead of `config.PAPER_TRADING` |
 | `tests/portfolio/test_circuit_breaker.py` | Added `paper_trading: bool = False` to `make_breaker`; passed through to `CircuitBreaker`; fixes 2 pre-existing test failures |
 | `handoff.md` | This file |
@@ -93,7 +96,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi. The system trad
 
 ## Next Steps
 
-1. **Restart the system and confirm KXBTC15M paper trades are flowing** — Gate 6 was the last blocker; it was pushed but a restart is required to pick it up. Run: `while true; do sqlite3 ~/Kronos\ V2/trades.db "SELECT COUNT(*) total, SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END) resolved FROM trades;"; sleep 30; done`. Expect `total` to climb within 1–2 cycles (10–15 min). Resolved count lags by ~15 min (KXBTC15M market duration).
+1. **Restart the system and confirm KXBTC15M paper trades are flowing** — the KXBTC15M reference price fix (4c3b1eb) requires a restart to take effect. Run: `while true; do sqlite3 ~/Kronos\ V2/trades.db "SELECT COUNT(*) total, SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END) resolved FROM trades;"; sleep 30; done`. Expect `total` to climb within 1–2 cycles (10–15 min). Resolved count lags by ~15 min (KXBTC15M market duration).
 
 2. **Diagnose if no fills appear after 30 min** — run `grep "checklist failed\|No signal" ~/Kronos\ V2/logs/kronos_*.log | tail -20`. If all failures are Gate 2 Kelly on KXBTCD — that's expected (wrong instrument). If Gate 5 failures dominate, Kronos edge is too thin; check `grep "signal_edge" logs`. If Gate 1 suppress is firing, check DeepSeek key and credits at `platform.deepseek.com`.
 
