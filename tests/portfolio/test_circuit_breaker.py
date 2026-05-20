@@ -23,6 +23,7 @@ def make_breaker(
     edge_len: int = 0,
     edge_value: float = 0.01,
     calibrator_samples: int = MIN_CALIBRATOR_SAMPLES,
+    paper_trading: bool = False,
 ) -> CircuitBreaker:
     monitor = MagicMock()
     monitor.get_daily_pnl.return_value = daily_pnl
@@ -42,6 +43,7 @@ def make_breaker(
         edge_tracker=edge_tracker,
         router=router,
         calibrator=calibrator,
+        paper_trading=paper_trading,
     )
 
 

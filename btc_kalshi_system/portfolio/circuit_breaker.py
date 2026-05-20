@@ -39,15 +39,17 @@ class CircuitBreaker:
         edge_tracker: EdgeTracker,
         router: KalshiClientRouter,
         calibrator: Calibrator,
+        paper_trading: bool | None = None,
     ) -> None:
         self._monitor = monitor
         self._edge_tracker = edge_tracker
         self._router = router
         self._calibrator = calibrator
+        self._paper_trading = paper_trading if paper_trading is not None else config.PAPER_TRADING
 
     def check(self) -> BreakerStatus:
         checks = [self._check_clients, self._check_drawdown]
-        if not config.PAPER_TRADING:
+        if not self._paper_trading:
             checks += [self._check_rolling_edge, self._check_calibrator]
         for fn in checks:
             result = fn()
