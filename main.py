@@ -330,8 +330,7 @@ class KronosV2:
         return {}
 
     def _get_active_markets(self) -> list[dict]:
-        # KXBTC15M = 15-min BTC up/down; KXBTCD = hourly BTC above/below
-        series = [("KXBTC15M", "15min"), ("KXBTCD", "1h")]
+        series = [("KXBTC15M", "15min")]
         markets: list[dict] = []
         for series_ticker, market_type in series:
             try:
