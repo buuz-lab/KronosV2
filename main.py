@@ -151,16 +151,14 @@ class KronosV2:
             logger.warning(f"Circuit breaker active [{status.reason.value}]: {status.message} — skipping cycle")
             return
 
-        # 2. Refresh DeepSeek context
+        # 2. Refresh DeepSeek / regime context on its own cadence (every 15 min),
+        #    then always load the latest from Redis for this cycle.
         now = time.time()
+        ctx = self._get_market_context()
         if now - self._last_deepseek_refresh >= DEEPSEEK_REFRESH_SECONDS:
-            ctx = self._get_market_context()
-            self._fusion.update_market_context(ctx)
             self._last_deepseek_refresh = now
             logger.debug("DeepSeek context refreshed")
-
-        # 3. Current market context
-        ctx = self._get_market_context()
+        # Always push the latest context once per cycle
         self._fusion.update_market_context(ctx)
 
         # 4. Composite price
@@ -482,7 +480,19 @@ class KronosV2:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    system = KronosV2()
+    # Route uncaught exceptions through loguru so they appear in the log file,
+    # not just on stderr.  Without this, a crash in __init__ leaves empty logs.
+    logger.catch(reraise=True)(lambda: None)()  # warm up the handler
+    import sys as _sys
+    _sys.excepthook = lambda exc_type, exc_val, exc_tb: logger.opt(exception=(exc_type, exc_val, exc_tb)).critical(
+        "Uncaught exception — process is exiting"
+    )
+
+    try:
+        system = KronosV2()
+    except Exception:
+        logger.exception("Fatal error during KronosV2 initialisation — see traceback above")
+        raise
 
     def _handle_shutdown(sig, frame):
         logger.info(f"Received signal {sig} — shutting down")
