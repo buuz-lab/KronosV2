@@ -337,7 +337,13 @@ class KronosV2:
                 resp = self._router._raw._request(
                     "GET", f"/trade-api/v2/markets?series_ticker={series_ticker}&status=open"
                 )
+                seen_tickers: set[str] = set()
                 for m in resp.get("markets", []):
+                    ticker = m.get("ticker", "")
+                    if ticker in seen_tickers:
+                        logger.warning(f"Duplicate ticker in API response, skipping: {ticker}")
+                        continue
+                    seen_tickers.add(ticker)
                     m["market_type"] = market_type
                     markets.append(m)
             except Exception as exc:
