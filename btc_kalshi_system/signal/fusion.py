@@ -75,7 +75,17 @@ class SignalFusionEngine:
         ds = self._deepseek.get_current_context(self._market_context)
 
         # Gate 1: DeepSeek says suppress
+        logger.debug(
+            f"DeepSeek context: suppress={ds['suppress_trading']} "
+            f"regime={ds['regime']} confidence={ds.get('confidence', '?')} "
+            f"reason={ds.get('suppress_reason')} notes={ds.get('notes', '')[:80]}"
+        )
         if ds["suppress_trading"]:
+            logger.warning(
+                f"Gate 1 (DeepSeek suppress): trading halted — "
+                f"regime={ds['regime']} reason={ds.get('suppress_reason')} "
+                f"notes={ds.get('notes', '')}"
+            )
             return None
 
         deepseek_regime = ds["regime"]

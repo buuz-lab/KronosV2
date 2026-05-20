@@ -356,10 +356,15 @@ class KronosV2:
                 except (TypeError, ValueError):
                     continue
         # Parse from ticker: KXBTC-25JUN-T95000 → 95000.0
+        # Also handles decimal strikes like KXBTCD-26MAY1922-T73749.99 → 73749.99
+        # Note: .isdigit() returns False for decimals, so use a try/float() instead.
         ticker = market.get("ticker", "")
         for part in ticker.split("-"):
-            if part.startswith("T") and part[1:].isdigit():
-                return float(part[1:])
+            if part.startswith("T"):
+                try:
+                    return float(part[1:])
+                except ValueError:
+                    continue
         # For up/down markets the threshold is "higher than current price",
         # so live BRTI price is the right substitute when no strike field is present.
         price = self._get_composite_price()
