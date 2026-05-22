@@ -99,17 +99,29 @@ def parse_args() -> argparse.Namespace:
                    help="Number of most-recent trades to hold out for evaluation (default: 100)")
     p.add_argument("--min-rows", type=int, default=500,
                    help="Minimum qualifying rows required to train (default: 500)")
+    p.add_argument("--max-rows", type=int, default=None,
+                   help="If set, use only the most recent N qualifying rows for training.")
     p.add_argument("--dry-run", action="store_true",
                    help="Compute and report metrics but do NOT write the model file.")
+    p.add_argument("--force", action="store_true",
+                   help="Skip the low-variance feature gate and train anyway.")
     return p.parse_args()
 
 
-def load_dataset(db_path: str) -> np.ndarray:
+def load_dataset(db_path: str, max_rows: int | None = None) -> list[tuple]:
     if not Path(db_path).exists():
         sys.exit(f"Database not found: {db_path}")
     conn = sqlite3.connect(db_path)
     try:
-        rows = conn.execute(_QUERY).fetchall()
+        if max_rows is not None:
+            # Most recent N rows, then reverse to ascending order
+            rows = conn.execute(
+                _QUERY.replace("ORDER BY timestamp ASC",
+                               f"ORDER BY timestamp DESC LIMIT {max_rows}")
+            ).fetchall()
+            rows = list(reversed(rows))
+        else:
+            rows = conn.execute(_QUERY).fetchall()
     finally:
         conn.close()
     return rows
@@ -152,9 +164,11 @@ def brier_score(y_true: np.ndarray, proba: np.ndarray) -> float:
 def main() -> None:
     args = parse_args()
 
-    rows = load_dataset(args.db)
+    rows = load_dataset(args.db, max_rows=args.max_rows)
     n_total = len(rows)
     print(f"Qualifying rows in {args.db}: {n_total}")
+    if args.max_rows is not None:
+        print(f"--max-rows {args.max_rows}: using most recent {n_total} qualifying rows")
 
     if n_total < args.min_rows:
         sys.exit(
@@ -186,32 +200,103 @@ def main() -> None:
     else:
         print("Train class balance is within [35%, 65%] — no scale_pos_weight applied.")
 
+    # ── Feature variance gate ─────────────────────────────────────────────────
+    low_variance_features: list[tuple[str, float]] = []
+    for i, feat in enumerate(_FEATURE_COLS):
+        std = float(X_train[:, i].std())
+        if std < 1e-6:
+            print(f"WARNING: feature '{feat}' has near-zero std in X_train: {std:.2e}")
+            low_variance_features.append((feat, std))
+    # tolerate up to 2 near-zero-std features; more than 2 suggests a pipeline failure
+    if len(low_variance_features) > 2:
+        print(
+            f"\nWARNING: {len(low_variance_features)} features have near-zero variance. "
+            "The model would be trained on effectively constant inputs — do NOT deploy it."
+        )
+        if not args.force:
+            sys.exit(1)
+        print("--force passed — proceeding despite low-variance features.")
+
     model = RegimeModel()
     model.train(X_train, y_train, **extra_kwargs)
 
-    # ── Evaluation ───────────────────────────────────────────────────────────
-    proba_test = model._clf.predict_proba(X_test)[:, 1]
-    pred_test = (proba_test >= 0.5).astype(int)
-    brier = brier_score(y_test, proba_test)
-    accuracy = float((pred_test == y_test).mean())
+    # ── Walk-forward cross-validation (evaluation only) ──────────────────────
+    # 3-fold expanding walk-forward on the non-held-out rows only.  The final
+    # model (trained on X_train above) is unaffected — this CV is for
+    # confidence reporting only.  Using n_cv (= n_total - test_size) keeps the
+    # held-out test set completely outside every CV fold.
+    n_cv = n_total - args.test_size   # keep hold-out completely out of CV
+    fold_cuts = [
+        (0, int(0.4 * n_cv), int(0.4 * n_cv), int(0.6 * n_cv)),  # fold 1
+        (0, int(0.6 * n_cv), int(0.6 * n_cv), int(0.8 * n_cv)),  # fold 2
+        (0, int(0.8 * n_cv), int(0.8 * n_cv), n_cv),             # fold 3
+    ]
 
-    # Kronos calibrated probability is also a P(close > strike) estimate, so the
-    # implied Kronos direction is comparable to the regime model's direction.
-    kronos_dir_test = (kronos_test >= 0.5).astype(int)
-    kronos_agreement = float((pred_test == kronos_dir_test).mean())
+    cv_briers: list[float] = []
+    cv_accuracies: list[float] = []
+    cv_kronos_agreements: list[float] = []
 
     print()
-    print(f"Test Brier score    : {brier:.4f}   (0.25 = coin flip; lower is better)")
-    print(f"Test accuracy       : {accuracy:.4f}")
-    print(f"Kronos agreement %  : {kronos_agreement:.4f}   (informational)")
+    print("── Walk-forward CV (3 folds) ─────────────────────────────────────────")
+    for fold_idx, (tr_start, tr_end, te_start, te_end) in enumerate(fold_cuts, start=1):
+        X_cv_train = X[tr_start:tr_end]
+        y_cv_train = y_up[tr_start:tr_end]
+        X_cv_test  = X[te_start:te_end]
+        y_cv_test  = y_up[te_start:te_end]
+        k_cv_test  = kronos_cal[te_start:te_end]
+
+        try:
+            cv_kwargs = maybe_scale_pos_weight(y_cv_train)
+        except SystemExit:
+            print(f"  Fold {fold_idx}: skipped — degenerate label distribution in train slice")
+            continue
+        cv_model = RegimeModel()
+        cv_model.train(X_cv_train, y_cv_train, **cv_kwargs)
+
+        proba_cv   = cv_model._clf.predict_proba(X_cv_test)[:, 1]
+        pred_cv    = (proba_cv >= 0.5).astype(int)
+        f_brier    = brier_score(y_cv_test, proba_cv)
+        f_accuracy = float((pred_cv == y_cv_test).mean())
+        k_dir_cv   = (k_cv_test >= 0.5).astype(int)
+        f_kag      = float((pred_cv == k_dir_cv).mean())
+
+        cv_briers.append(f_brier)
+        cv_accuracies.append(f_accuracy)
+        cv_kronos_agreements.append(f_kag)
+
+        print(
+            f"  Fold {fold_idx}  train=[{tr_start}:{tr_end}]  test=[{te_start}:{te_end}]  "
+            f"Brier={f_brier:.4f}  Acc={f_accuracy:.4f}  KronosAgreement={f_kag:.4f}"
+        )
+
+    mean_brier = float(np.mean(cv_briers))
+    std_brier  = float(np.std(cv_briers, ddof=1))
+    mean_acc   = float(np.mean(cv_accuracies))
+    std_acc    = float(np.std(cv_accuracies, ddof=1))
+    mean_kag   = float(np.mean(cv_kronos_agreements))
+    std_kag    = float(np.std(cv_kronos_agreements, ddof=1))
+
     print()
-    if kronos_agreement < 0.55:
-        print("WARNING: Kronos agreement < 55%. The regime model is contradicting Kronos")
-        print("         on nearly half of trades. Investigate before enabling Gate 2")
+    print(f"  CV mean  Brier={mean_brier:.4f} ± {std_brier:.4f}   "
+          f"Acc={mean_acc:.4f} ± {std_acc:.4f}   "
+          f"KronosAgreement={mean_kag:.4f} ± {std_kag:.4f}")
+    print("──────────────────────────────────────────────────────────────────────")
+
+    if std_brier > 0.05:
+        print(
+            "\nWARNING: Brier std across folds is {:.4f} (> 0.05). Performance is highly "
+            "variable across time windows — the model may be fitting regime-specific "
+            "noise. Consider gathering more data or reviewing feature engineering before "
+            "deploying.".format(std_brier)
+        )
+    if mean_kag < 0.55:
+        print("WARNING: Kronos agreement < 55% (CV mean). The regime model is contradicting")
+        print("         Kronos on nearly half of trades. Investigate before enabling Gate 2")
         print("         enforcement — flipping REGIME_GATE2_ENFORCING=True now would")
         print("         block roughly that fraction of trades.")
-    if brier > 0.25:
-        print("WARNING: Brier > 0.25 (worse than a coin flip). Do NOT deploy this model.")
+    if mean_brier > 0.25:
+        print("WARNING: Brier > 0.25 (CV mean, worse than a coin flip). Do NOT deploy this model.")
+    print()
 
     if args.dry_run:
         print("\n--dry-run set — model NOT saved.")
@@ -224,6 +309,22 @@ def main() -> None:
     print("Restart KronosV2 to pick it up. Gate 2 will run in SHADOW mode by default")
     print("(config.REGIME_GATE2_ENFORCING=False) — observe disagreement logs for ~50")
     print("trades, then flip to True to enable enforcement.")
+
+    # ── Feature importances ───────────────────────────────────────────────────
+    importances = model._clf.feature_importances_
+    total_importance = float(importances.sum())
+    ranked = sorted(zip(_FEATURE_COLS, importances), key=lambda x: x[1], reverse=True)
+    print("\nFeature importances (descending):")
+    for feat, imp in ranked:
+        print(f"  {feat:<25s}  {imp:.4f}")
+    top_feat, top_imp = ranked[0]
+    if total_importance == 0:
+        print("WARNING: all feature importances are zero — model may not have learned anything.")
+    elif (top_imp / total_importance) > 0.60:
+        print(
+            f"\nWARNING: '{top_feat}' accounts for {top_imp / total_importance:.1%} of total "
+            "importance. The model is essentially a single-feature classifier."
+        )
 
 
 if __name__ == "__main__":

@@ -36,6 +36,17 @@ def test_funding_rate_trend_returns_zero_when_insufficient_history():
     assert trend == pytest.approx(0.0)
 
 
+def test_funding_rate_trend_returns_zero_when_no_entry_older_than_window():
+    feed = make_feed()
+    # Both entries within the 4-hour lookback — no entry older than cutoff
+    _1h_ms = 3_600_000
+    history = [
+        {"timestamp": 0,      "fundingRate": 0.01},
+        {"timestamp": _1h_ms, "fundingRate": 0.03},
+    ]
+    assert feed._funding_rate_trend(history) == pytest.approx(0.0)
+
+
 # ── oi_delta_pct ───────────────────────────────────────────────────────────────
 
 def test_oi_delta_pct_positive_growth():

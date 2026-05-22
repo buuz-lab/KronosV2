@@ -114,7 +114,16 @@ class DerivativesFeed:
         }
 
     def _funding_rate_trend(self, history: list[dict]) -> float:
-        """4-hour delta in funding rate. Returns 0.0 if insufficient history."""
+        """Funding rate change over the last _FUNDING_LOOKBACK_MS (4 hours).
+
+        Returns 0.0 if:
+          - Fewer than 2 history entries exist, OR
+          - No entry is older than the lookback window.
+        In both cases 0.0 means neutral / unknown, not a real zero trend.
+
+        Do NOT change _FUNDING_LOOKBACK_MS or limit=10 — those must remain
+        consistent with what existing training rows were collected under.
+        """
         if len(history) < 2:
             return 0.0
         latest_ts = history[-1]["timestamp"]
@@ -124,8 +133,7 @@ class DerivativesFeed:
             None,
         )
         if old is None:
-            # Fallback: use the oldest entry we have
-            old = history[0]
+            return 0.0  # No entry older than lookback window — trend unknown, report neutral
         return float(history[-1]["fundingRate"]) - float(old["fundingRate"])
 
     def _oi_delta_pct(self, prev_oi: float, curr_oi: float) -> float:
