@@ -448,43 +448,53 @@ class KronosV2:
         return markets
 
     def _extract_strike(self, market: dict) -> float | None:
-        for field in ("floor_strike", "cap_strike", "strike_price", "result_at_open"):
+        ticker = market.get("ticker", "")
+
+        # Primary: Kalshi sets floor_strike on KXBTC15M markets to the BRTI average
+        # at market open — this is the canonical resolution reference price.
+        floor = market.get("floor_strike")
+        if floor is not None:
+            try:
+                v = float(floor)
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                pass
+
+        # Secondary: other explicit strike fields (e.g. KXBTCD strike markets).
+        for field in ("cap_strike", "strike_price", "result_at_open"):
             val = market.get(field)
             if val is not None:
                 try:
-                    return float(val)
+                    v = float(val)
+                    if v > 0:
+                        return v
                 except (TypeError, ValueError):
                     continue
+
         # Parse from ticker: KXBTC-25JUN-T95000 → 95000.0
-        # Also handles decimal strikes like KXBTCD-26MAY1922-T73749.99 → 73749.99
-        # Note: .isdigit() returns False for decimals, so use a try/float() instead.
-        ticker = market.get("ticker", "")
         for part in ticker.split("-"):
             if part.startswith("T"):
                 try:
                     return float(part[1:])
                 except ValueError:
                     continue
-        # KXBTC15M up/down markets have no explicit strike field.
-        # These markets resolve "yes" if BRTI at resolution > BRTI at market open,
-        # where "market open" = close of the last completed 15-min BRTI candle.
-        # Using the live 5-min close as threshold is wrong: if BTC moved $300 during
-        # the current 15-min window, the wrong reference price produces the wrong
-        # direction signal entirely.
+
+        # Fallback for 15-min markets: use last completed BRTI candle close.
+        # floor_strike is set by Kalshi at market open; this path is only reached
+        # if the market opened before BRTI data was available.
         if market.get("market_type") == "15min":
             price = self._get_15min_reference_price()
             if price > 0.0:
-                logger.debug(
-                    f"No strike field for {ticker} (15-min up/down) — "
-                    f"using last completed 15-min BRTI close {price:.2f} as threshold"
+                logger.warning(
+                    f"floor_strike missing/zero for {ticker} — "
+                    f"falling back to last completed 15-min BRTI close {price:.2f}"
                 )
                 return price
-        # Fallback for other timeframes or if no 15-min candles are available yet.
+
         price = self._get_composite_price()
         if price > 0.0:
-            logger.debug(
-                f"No strike field found for {ticker} — using composite price {price:.2f} as fallback"
-            )
+            logger.warning(f"No strike found for {ticker} — using composite price {price:.2f}")
             return price
         return None
 
