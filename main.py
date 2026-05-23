@@ -41,7 +41,6 @@ SIGNAL_INTERVAL_SECONDS = 300
 DEEPSEEK_REFRESH_SECONDS = 900
 RECOVERY_INTERVAL_SECONDS = 3600
 MAX_POSITIONS_PER_TICKER_PER_SIDE = 2
-MIN_ENTRY_PRICE_CENTS = 20
 
 # Per-market blackout: stop new entries this many seconds before close_time
 _BLACKOUT_SECONDS = {"15min": 3 * 60, "1h": 10 * 60}
@@ -311,11 +310,6 @@ class KronosV2:
 
         # f. Pre-trade checklist
         fill_price_cents = best_ask_cents if signal.direction == 1 else (100 - best_bid_cents)
-        if fill_price_cents < MIN_ENTRY_PRICE_CENTS:
-            logger.info(
-                f"Skipping {ticker}: entry price {fill_price_cents}¢ below floor {MIN_ENTRY_PRICE_CENTS}¢"
-            )
-            return
 
         side_count = self._monitor.ticker_direction_count(ticker, signal.direction)
         if side_count >= MAX_POSITIONS_PER_TICKER_PER_SIDE:
