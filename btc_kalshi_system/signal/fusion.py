@@ -194,7 +194,11 @@ class SignalFusionEngine:
         The caller is expected to consult `stale` to decide whether to bail out.
         """
         ctx = self._market_context
-        stale = not ctx  # empty dict ⇒ Redis read failed or key expired
+        # stale=True when: (a) ctx is empty — Redis key was expired and no LKG
+        # existed, OR (b) ctx carries _lkg=True — LKG fallback was used because
+        # the primary key expired during an exchange outage. In both cases the
+        # row must be excluded from RegimeModel training.
+        stale = not ctx or ctx.get("_lkg", False)
 
         # brti_volatility_1h is computed locally from the OHLCV store and is
         # independent of the Redis regime:features key. It can be valid even

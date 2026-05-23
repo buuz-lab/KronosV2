@@ -14,6 +14,9 @@ def make_feed() -> DerivativesFeed:
     feed = DerivativesFeed.__new__(DerivativesFeed)
     feed._redis = fakeredis.FakeRedis()
     feed._exchange = MagicMock()
+    feed._kraken_exchange = None
+    feed._ccxt_async = MagicMock()
+    feed._prev_oi = 0.0
     return feed
 
 
@@ -197,3 +200,65 @@ def test_lkg_key_written_on_successful_write():
     # The six feature values must match what was written
     assert lkg["funding_rate"] == 0.01
     assert lkg["cvd_normalized"] == 0.3
+
+
+# ── Fallback paths ─────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_coinglass_fallback_when_okx_funding_oi_fails():
+    """When OKX funding/OI raises, _coinglass_funding_and_oi() is called and values are non-zero."""
+    feed = make_feed()
+    feed._prev_oi = 1000.0
+    feed._exchange = AsyncMock()
+    feed._exchange.fetch_funding_rate_history.side_effect = Exception("OKX unreachable")
+    feed._exchange.fetch_open_interest.side_effect = Exception("OKX unreachable")
+
+    coinglass_result = (0.0035, 0.0012, 0.05)
+    with patch.object(feed, "_coinglass_funding_and_oi", new=AsyncMock(return_value=coinglass_result)):
+        curr_funding, trend, oi_delta = await feed._fetch_funding_and_oi()
+
+    assert curr_funding == pytest.approx(0.0035)
+    assert trend == pytest.approx(0.0012)
+    assert oi_delta == pytest.approx(0.05)
+
+
+@pytest.mark.asyncio
+async def test_kraken_fallback_when_okx_trades_fail():
+    """When OKX fetch_trades raises, Kraken fallback is called and CVD/basis are non-zero."""
+    feed = make_feed()
+    feed._exchange = AsyncMock()
+    feed._exchange.fetch_trades.side_effect = Exception("OKX unreachable")
+
+    # Fake Kraken exchange returning trades with a buy skew
+    kraken_trades = [
+        {"amount": 3.0, "side": "buy", "price": 67000.0},
+        {"amount": 1.0, "side": "sell", "price": 67000.0},
+    ]
+    mock_kraken = AsyncMock()
+    mock_kraken.fetch_trades.return_value = kraken_trades
+    feed._ccxt_async.kraken.return_value = mock_kraken
+
+    # Seed BRTI so basis_spread_pct has a denominator
+    feed._redis.set("brti:resolution_estimate", "67000.0")
+
+    cvd, basis = await feed._fetch_trades_data()
+
+    feed._ccxt_async.kraken.assert_called_once()
+    mock_kraken.fetch_trades.assert_called_once()
+    assert cvd == pytest.approx(0.5)   # (3-1)/(3+1)
+    assert basis == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_coinglass_fallback_skipped_when_api_key_empty():
+    """When COINGLASS_API_KEY is empty, _coinglass_funding_and_oi returns zeros without raising."""
+    feed = make_feed()
+    feed._prev_oi = 0.0
+
+    import btc_kalshi_system.data.derivatives_feed as df_module
+    with patch.object(df_module, "COINGLASS_API_KEY", ""):
+        curr_funding, trend, oi_delta = await feed._coinglass_funding_and_oi()
+
+    assert curr_funding == pytest.approx(0.0)
+    assert trend == pytest.approx(0.0)
+    assert oi_delta == pytest.approx(0.0)

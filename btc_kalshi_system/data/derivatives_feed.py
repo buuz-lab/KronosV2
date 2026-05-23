@@ -2,17 +2,20 @@ import asyncio
 import json
 import time
 
+import aiohttp
 import numpy as np
 import redis
 from loguru import logger
 
-from config import REDIS_URL
+from config import COINGLASS_API_KEY, REDIS_URL
 
 _REFRESH_INTERVAL = 300   # 5 minutes
 _FEATURES_TTL = 600       # 2x refresh interval — tolerates one missed cycle without expiring
 _LKG_TTL = 86_400         # 24 hours — last-known-good survives multi-hour exchange outages
 _FUNDING_LOOKBACK_MS = 4 * 3600_000  # 4 hours in milliseconds
 _SYMBOL = "BTC/USDT:USDT"
+_KRAKEN_SYMBOL = "BTC/USD"
+_COINGLASS_BASE = "https://open-api-v4.coinglass.com"
 
 
 class DerivativesFeed:
@@ -35,6 +38,7 @@ class DerivativesFeed:
         self._exchange = None   # resolved lazily on first fetch
         self._exchange_name: str = ""
         self._prev_oi: float = 0.0
+        self._kraken_exchange = None  # lazy init for Kraken trade fallback
 
     # ── Public entry point ─────────────────────────────────────────────────────
 
@@ -93,23 +97,13 @@ class DerivativesFeed:
     # ── Feature computation ────────────────────────────────────────────────────
 
     async def _fetch_features(self) -> dict:
-        funding_history, oi_data, trades = await asyncio.gather(
-            self._exchange.fetch_funding_rate_history(_SYMBOL, limit=10),
-            self._exchange.fetch_open_interest(_SYMBOL),
-            self._exchange.fetch_trades(_SYMBOL, limit=500),
+        results = await asyncio.gather(
+            self._fetch_funding_and_oi(),
+            self._fetch_trades_data(),
         )
-
-        curr_funding = float(funding_history[-1]["fundingRate"]) if funding_history else 0.0
-        trend = self._funding_rate_trend(funding_history)
-
-        curr_oi = float(oi_data.get("openInterestAmount", 0.0))
-        oi_delta = self._oi_delta_pct(self._prev_oi, curr_oi)
-        self._prev_oi = curr_oi
-
-        cvd = self._cvd_normalized(trades)
-        basis = self._basis_spread_pct(trades)
+        curr_funding, trend, oi_delta = results[0]
+        cvd, basis = results[1]
         vol = self._brti_volatility_1h()
-
         return {
             "funding_rate":       curr_funding,
             "funding_rate_trend": trend,
@@ -118,6 +112,80 @@ class DerivativesFeed:
             "basis_spread_pct":   basis,
             "brti_volatility_1h": vol,
         }
+
+    async def _fetch_funding_and_oi(self) -> tuple[float, float, float]:
+        """Returns (curr_funding, funding_trend, oi_delta_pct).
+        Tries OKX first; falls back to Coinglass REST on any exception."""
+        try:
+            funding_history, oi_data = await asyncio.gather(
+                self._exchange.fetch_funding_rate_history(_SYMBOL, limit=10),
+                self._exchange.fetch_open_interest(_SYMBOL),
+            )
+            curr_funding = float(funding_history[-1]["fundingRate"]) if funding_history else 0.0
+            trend = self._funding_rate_trend(funding_history)
+            curr_oi = float(oi_data.get("openInterestAmount", 0.0))
+            oi_delta = self._oi_delta_pct(self._prev_oi, curr_oi)
+            self._prev_oi = curr_oi
+            return curr_funding, trend, oi_delta
+        except Exception as exc:
+            logger.warning(
+                f"DerivativesFeed: OKX funding/OI fetch failed — using Coinglass fallback ({exc})"
+            )
+            return await self._coinglass_funding_and_oi()
+
+    async def _coinglass_funding_and_oi(self) -> tuple[float, float, float]:
+        if not COINGLASS_API_KEY:
+            logger.warning("DerivativesFeed: COINGLASS_API_KEY not set — Coinglass fallback skipped")
+            return 0.0, 0.0, 0.0
+
+        headers = {"CG-API-KEY": COINGLASS_API_KEY}
+        fr_url = f"{_COINGLASS_BASE}/api/futures/funding-rate/history"
+        oi_url = f"{_COINGLASS_BASE}/api/futures/open-interest/exchange-list"
+
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async def _get(url: str, params: dict) -> dict:
+                async with session.get(url, params=params) as r:
+                    return await r.json()
+
+            fr_data, oi_data = await asyncio.gather(
+                _get(fr_url, {"exchange": "OKX", "symbol": "BTCUSDT", "interval": "8h", "limit": "10"}),
+                _get(oi_url, {"symbol": "BTC"}),
+            )
+
+        history = [
+            {"timestamp": item["time"], "fundingRate": float(item["close"])}
+            for item in (fr_data.get("data") or [])
+        ]
+        curr_funding = history[-1]["fundingRate"] if history else 0.0
+        trend = self._funding_rate_trend(history)
+
+        okx_row = next(
+            (row for row in (oi_data.get("data") or []) if row.get("exchange", "").upper() == "OKX"),
+            None,
+        )
+        curr_oi = float(okx_row["open_interest_quantity"]) if okx_row else 0.0
+        oi_delta = self._oi_delta_pct(self._prev_oi, curr_oi)
+        if curr_oi:
+            self._prev_oi = curr_oi
+        return curr_funding, trend, oi_delta
+
+    async def _fetch_trades_data(self) -> tuple[float, float]:
+        """Returns (cvd_normalized, basis_spread_pct).
+        Tries OKX first; falls back to Kraken fetchTrades on any exception."""
+        try:
+            trades = await self._exchange.fetch_trades(_SYMBOL, limit=500)
+            return self._cvd_normalized(trades), self._basis_spread_pct(trades)
+        except Exception as exc:
+            logger.warning(
+                f"DerivativesFeed: OKX trades fetch failed — using Kraken fallback ({exc})"
+            )
+            return await self._kraken_trades_data()
+
+    async def _kraken_trades_data(self) -> tuple[float, float]:
+        if self._kraken_exchange is None:
+            self._kraken_exchange = self._ccxt_async.kraken({"enableRateLimit": True})
+        trades = await self._kraken_exchange.fetch_trades(_KRAKEN_SYMBOL, limit=500)
+        return self._cvd_normalized(trades), self._basis_spread_pct(trades)
 
     def _funding_rate_trend(self, history: list[dict]) -> float:
         """Funding rate change over the last _FUNDING_LOOKBACK_MS (4 hours).
