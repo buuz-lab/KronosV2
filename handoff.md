@@ -12,14 +12,13 @@ The pipeline is fully instrumented — just waiting on data volume.
 
 ## Current Progress
 
-**As of 2026-05-23 ~09:47 UTC: 108 training-ready rows. System is live and running.**
+**As of 2026-05-23 ~12:35 UTC: 128 training-ready rows. System is live (PID 43368).**
 
 - `PAPER_TRADING=true` in `.env`
-- **~45.7 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-01 (~8.6 days).**
-- Stats at this session: 322 total trades / 108 training-ready rows, 181W / 140L (56%), Net P&L: +$89.86.
-- System is **running** (PID changes on restart — check `pgrep -f main.py`).
-- **OKX outage 14:20–21:00+ PDT 2026-05-22.** Watchdog fired ERROR continuously. Trades during
-  this window fired on stale (zero) features. LKG fix addresses this for future outages.
+- **~48 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-01 (~7.8 days).**
+- Stats at this handoff: 341 total trades / 128 training-ready rows, 190W / 151L (55.6%), Net P&L: +$5.64
+- System is **running** — confirm with `ps aux | grep "[Pp]ython.*main\.py"`
+- Latest commit: `bcd3967`
 
 **Go-live thresholds (both must be met):**
 - ≥ 500 resolved trades total — for calibrator
@@ -30,229 +29,154 @@ The pipeline is fully instrumented — just waiting on data volume.
 
 ## What Worked (most recent first)
 
+- **Per-side position cap + minimum price floor (commit `bcd3967`).** Replaced
+  blanket `MAX_POSITIONS_PER_TICKER=3` with two independent controls:
+  - `MAX_POSITIONS_PER_TICKER_PER_SIDE=2`: YES and NO positions tracked separately.
+    Kronos can now flip and enter the opposite direction on the same market if CVD
+    flips mid-candle, without being blocked by the cap.
+  - `MIN_ENTRY_PRICE_CENTS=20`: skips any entry priced below 20¢ probability.
+    Prevents catastrophic averaging into near-certain losers (e.g. 169x12¢ trade
+    cost $20.28 in one candle).
+  - Added `ticker_direction_count(ticker, direction)` to `PortfolioMonitor` (Redis-backed).
+
+- **`floor_strike` as primary strike source (commit `ee2bc31`).** Kalshi sets
+  `floor_strike` to the BRTI average at market open — the canonical resolution
+  reference price. Added `> 0` guard to reject unset markets. Previously accepted
+  `floor_strike=0`, making Kronos compute P(BTC > $0) ≈ 100%, biasing all signals YES→UP.
+
+- **Circuit breaker drawdown skipped in paper trading (commit `bc9f988`).** Daily
+  drawdown check only runs in live mode. In paper mode it was halting data collection
+  when paper P&L crossed -$200.
+
+- **Per-ticker cap (Redis-backed) (commit `82375d3`).** `ticker_direction_count`
+  reads from `portfolio:open_positions` Redis hash — authoritative across all
+  processes. In-memory counts fail when multiple main.py processes are running.
+
 - **Last-Known-Good (LKG) feature fallback.** During exchange outages `regime:features`
-  expires and was returning all-zero features to Gate 2. Fix: `_write_features()` now
-  also writes `regime:features:lkg` (TTL=24h) with a `_lkg_written_at` timestamp.
-  `_get_market_context()` tries LKG when the primary key is expired, logs the age, and
-  injects `_lkg=True` sentinel. `fusion._regime_features()` treats `_lkg=True` as stale
-  so those rows are excluded from training — same as zero-fallback rows. Gate 2 now runs
-  on real (aged) features instead of zeros during multi-hour OKX outages.
-  Triggered by: 14:20–21:00+ PDT OKX outage on 2026-05-22.
-- **Per-trade feature snapshot via TradingSignal.** Added `regime_features: dict`
-  and `features_stale: bool` to the `TradingSignal` dataclass. Persisted values
-  are exactly what the model was fed — no train/serve skew possible.
-- **Idempotent ALTER TABLE migration.** `_TRADES_COLUMN_MIGRATIONS` in `main.py`
-  runs every startup, swallowing duplicate-column errors.
-- **`features_stale` flag.** When Redis `regime:features` is missing/expired,
-  fusion uses 0.0 fallbacks for inference but tags the row stale. Training filters
-  on `features_stale=0`.
-- **Label semantics.** `up_label = int(direction == outcome)` — NOT `outcome`.
-  The `outcome` column means "did this trade win," which is inverted for short
-  trades. All evaluation code in this repo uses this formula consistently.
-- **Soft-launch Gate 2.** `REGIME_GATE2_ENFORCING=false` default. Disagreements
-  are logged but not blocked. Avoids sudden ~30% drop in trade frequency.
-- **3-fold walk-forward CV** in train_regime.py for evaluation confidence.
-  Fold windows operate on `X_train` only — held-out `--test-size` rows stay
-  completely outside CV. Warns if Brier std > 0.05.
-- **`return 0.0` in `_funding_rate_trend` fallback.** When the 4-hour window
-  can't be computed, returns neutral (not a noisy delta from history[0]).
-- **`_FRESH_FILTER` constant in regime_health_check.py / auto_retrain.py.**
-  Requires all 6 feature columns NOT NULL (not just `funding_rate`) to prevent
-  NaN passthrough to inference.
-- **Loguru hardening (`enqueue=True, catch=True`).** File sink no longer silently
-  drops itself on write/rotation errors. `enqueue=True` makes writes non-blocking
-  and thread-safe under asyncio.
-- **TTL=600s for `regime:features`.** Doubled from 300s — tolerates one full
-  missed refresh cycle without expiring.
-- **Overlapping refresh in `DerivativesFeed.run()`.** After a successful write,
-  sleeps 240s instead of 300s. Key is always renewed with 60s to spare, even if
-  OKX fetch takes extra time.
-- **`_regime_watchdog` coroutine in `KronosV2`.** Checks `regime:features` TTL
-  every 60s. Fires macOS notifications (via `osascript`) and logs WARNING/ERROR
-  if TTL drops below 90s or key is fully expired. Wired into `asyncio.gather`.
+  expires. Fix: writes `regime:features:lkg` (TTL=24h). `_get_market_context()` tries
+  LKG when primary expired. `fusion._regime_features()` treats `_lkg=True` as stale.
+
+- **CVD oscillation insight.** Today CVD swung -0.747→+0.679→-0.591→+0.373→-0.567→+0.623
+  within 2 hours. Kronos (bootstrap mode, Monte Carlo only) doesn't read CVD — it fires
+  on price momentum alone. This causes 5-6 consecutive losses when CVD and price diverge.
+  The regime model gating on CVD alignment is the long-term fix.
+
+- **Win rate analysis.** YES→UP with negative CVD: 32.3% (well below breakeven).
+  Price bucket win rates: <50¢ = 37-44%, 50-65¢ = 56.4%, 65+¢ = 72.4%.
+  NO→DOWN all-time: 60.9% vs YES→UP: 51.4% — real directional asymmetry.
+
+- **Coinglass + Kraken fallbacks for derivatives feed.**
+- **Loguru hardening (`enqueue=True, catch=True`).**
+- **TTL=600s + overlapping 240s refresh for `regime:features`.**
+- **`_regime_watchdog` coroutine** (TTL check every 60s, macOS notifications).
 
 ---
 
 ## What Failed / Avoided
 
-- **Backfilling the 200+ pre-instrumentation trades.** Rejected — funding rate /
-  OI / CVD / basis history not reliably reconstructable. Pre-migration rows stay
-  training-invisible (NULL features), used only for calibrator + edge tracker.
-- **Re-reading Redis at `_record_trade_sqlite`.** Would reintroduce train/serve
-  skew if a cycle spans a DerivativesFeed refresh. Signal carries the snapshot.
-- **Consolidating the two `brti_volatility_1h` implementations.** `DerivativesFeed`
-  uses Redis ticks; `fusion._regime_features()` uses 5-min OHLCV pct_change std.
-  The persisted column is the fusion version. Do NOT consolidate after training
-  begins — it would invalidate any trained model.
-- **Using `old = history[0]` as funding_rate_trend fallback.** Made the lookback
-  window non-deterministic (silently stretched to 80+ hours). Fixed to `return 0.0`.
-- **TTL == refresh interval (both 300s).** Any asyncio scheduling drift or slow
-  OKX call caused the key to expire before renewal. Root cause of all staleness
-  incidents observed. Fixed via TTL=600s + overlapping refresh.
-- **Loguru silent sink death.** At 05:07 UTC all 4 exchange feeds disconnected
-  simultaneously + Kalshi API timeout. Log rotation failed during this storm and
-  loguru silently dropped the file sink at 05:16 UTC. System traded blind for 7
-  hours with no log record. Fixed via `catch=True` + `enqueue=True`.
+- **Blanket MAX_POSITIONS_PER_TICKER=3.** Prevented CVD flip recovery — when CVD
+  flipped mid-candle, the cap blocked the correctly-directioned opposite trade.
+  Replaced by per-side cap.
+- **Averaging into low-probability entries.** 169x12¢ NO→DOWN ($20.28 loss in one trade)
+  was the single most destructive trade. The 20¢ floor prevents this.
+- **In-memory position count for per-ticker cap.** Broke when multiple stale main.py
+  processes ran simultaneously. Each had its own `_positions` dict, so the cap was
+  per-process, not global. Always use Redis-backed count.
+- **floor_strike=0 accepted as valid.** Made Kronos compute P(BTC > $0) ≈ 100%.
+  Fixed with `if v > 0` guard.
+- **Circuit breaker in paper mode.** Tripped at -$200 paper P&L, halting all new
+  trades and training data collection. Now disabled in paper mode.
+- **Backfilling 200+ pre-instrumentation trades.** Rejected — funding rate/OI/CVD/basis
+  history not reliably reconstructable.
+- **TTL == refresh interval (both 300s).** Any drift caused key expiry before renewal.
+  Fixed via TTL=600s + overlapping refresh.
 
 ---
 
 ## Files Touched / Created
 
-### This session (2026-05-23 — floor_strike, circuit breaker, cap fixes)
+### This session (2026-05-23)
 
 | File | Change |
 |------|--------|
-| `main.py` | `_extract_strike`: `floor_strike` from Kalshi API is now the explicit primary path with a `> 0` guard. Kalshi sets `floor_strike` to the BRTI average at market open — the canonical resolution reference price. Zero floor_strike (unset market) previously returned `0.0`, making Kronos compute P(BTC > $0) ≈ 100% and biasing all signals YES→UP. BRTI candle fallback now logs WARNING instead of DEBUG. |
-| `btc_kalshi_system/portfolio/circuit_breaker.py` | Daily drawdown check now skipped in `PAPER_TRADING=true` mode. Previously tripped at -$200 paper P&L, halting trade data collection. Drawdown check remains active in live mode. **Commit:** `bc9f988` |
+| `main.py` | `_extract_strike`: `floor_strike` primary path with `> 0` guard. Replaced `MAX_POSITIONS_PER_TICKER=3` with `MAX_POSITIONS_PER_TICKER_PER_SIDE=2` and `MIN_ENTRY_PRICE_CENTS=20`. Price floor check and per-side cap gate added to `_process_market`. Removed duplicate `fill_price_cents` assignment. Circuit breaker drawdown disabled in paper mode. |
+| `btc_kalshi_system/portfolio/monitor.py` | Added `ticker_direction_count(ticker, direction) -> int` (Redis-backed with in-memory fallback). |
+| `btc_kalshi_system/portfolio/circuit_breaker.py` | Daily drawdown check moved inside `if not self._paper_trading` block. |
+| `scripts/monitor_trades.py` | **NEW.** Live SQLite polling monitor (15s interval) — prints new trades, resolutions, running record, P&L, training progress bar. |
 
-**Key insight from this session — why YES→UP kept losing:**
-- Win rate by price bucket: 37.8% at 35–50¢, 56.4% at 50–65¢, 72.4% at 65+¢
-- Win rate when CVD negative + YES→UP: **32.3%** (31 trades) — well below breakeven
-- BTC trended down all session; YES→UP markets priced cheaper as the move continued
-- System has no mechanism to stand down in bearish regimes without the regime model
-- NO→DOWN has 60.9% win rate all-time vs YES→UP at 51.4% — real asymmetry exists
-
-### This session (2026-05-23 — per-ticker position cap + Redis-backed count)
+### Prior sessions (2026-05-22 — 2026-05-23)
 
 | File | Change |
 |------|--------|
-| `btc_kalshi_system/portfolio/monitor.py` | Added `ticker_position_count(ticker) -> int` — first counts via Redis `hgetall` (cross-process accurate), falls back to in-memory on `RedisError`. |
-| `main.py` | Added `MAX_POSITIONS_PER_TICKER = 3` constant. Added gate before pre-trade checklist: skips market if `ticker_position_count(ticker) >= 3`. |
-
-**Why:** Without this cap the system was averaging-down into every price dip on the same
-ticker, stacking 4+ positions (43x44¢ → 83x25¢ → 106x20¢ → 149x13¢) and concentrating
-$80+ of exposure on a single bet. The existing `has_timeframe_position` check only applies
-a Kelly correlation discount (0.7×) — it never blocks entry. The `MAX_TOTAL_EXPOSURE_DOLLARS`
-cap didn't trigger because each trade was small in dollar terms at low prices. The "3 trades
-per market" behavior that previously existed was emergent from the exposure math at typical
-prices (~50¢), not an explicit rule. This commit makes it explicit.
-
-**Redis read is mandatory:** The initial implementation used `self._positions` (in-memory).
-This failed because multiple stale main.py processes (PIDs from prior sessions) were running
-simultaneously, each with their own in-memory dict — so each process saw only its own
-positions and the cap was effectively per-process. Fix: read directly from `portfolio:open_positions`
-Redis hash on every `ticker_position_count` call. This is authoritative across all processes.
-
-**Stale process gotcha:** Always verify only one main.py is running: `pgrep -af main.py`.
-If multiple appear, `kill -9` all but the newest, then restart the newest so it reloads
-Redis state cleanly. Stale processes from prior sessions can persist indefinitely.
-
-**Commits:** `2e7480f` (initial cap), `82375d3` (Redis-backed count)
-
-### This session (2026-05-22, late evening — Coinglass + Kraken fallbacks)
-
-| File | Change |
-|------|--------|
-| `btc_kalshi_system/data/derivatives_feed.py` | Split `_fetch_features()` into `_fetch_funding_and_oi()` (OKX→Coinglass REST fallback) and `_fetch_trades_data()` (OKX→Kraken ccxt fallback). Added `_coinglass_funding_and_oi()` and `_kraken_trades_data()`. Constants `_KRAKEN_SYMBOL`, `_COINGLASS_BASE` added. `_kraken_exchange` lazy attribute in `__init__`. |
-| `config.py` | Added `COINGLASS_API_KEY: str = os.getenv("COINGLASS_API_KEY", "")`. |
-| `tests/data/test_derivatives_feed.py` | +2 tests: Coinglass fallback called when OKX funding/OI fails; Kraken fallback called when OKX trades fail, with correct CVD value asserted. `make_feed()` updated with `_kraken_exchange`, `_ccxt_async`, `_prev_oi` attributes. |
-
-### This session (2026-05-22, evening — LKG fix)
-
-| File | Change |
-|------|--------|
-| `btc_kalshi_system/data/derivatives_feed.py` | Added `_LKG_TTL = 86_400`. `_write_features()` now also writes `regime:features:lkg` (24h TTL) with `_lkg_written_at` timestamp. |
-| `main.py` | `_get_market_context()`: when `regime:features` expired, tries `regime:features:lkg`; pops timestamp, logs age, injects `_lkg=True` sentinel, returns LKG dict instead of `{}`. |
-| `btc_kalshi_system/signal/fusion.py` | `_regime_features()`: staleness check expanded to `stale = not ctx or ctx.get("_lkg", False)` so LKG rows are still excluded from training. |
-| `tests/data/test_derivatives_feed.py` | +1 test: `test_lkg_key_written_on_successful_write` — verifies LKG key exists, TTL~86400, all 6 feature keys present, `_lkg_written_at` populated. |
-
-### This session (2026-05-22, afternoon)
-
-| File | Change |
-|------|--------|
-| `main.py` | Loguru file sink: added `enqueue=True, catch=True`. Added `_regime_watchdog` coroutine (TTL check every 60s, macOS notifications via `osascript` on WARNING/ERROR). Wired watchdog into `asyncio.gather`. Added `import subprocess`. |
-| `btc_kalshi_system/data/derivatives_feed.py` | `_FEATURES_TTL` 300→600. `run()` overlapping refresh: sleep 240s (not 300s) after successful write so key never expires before renewal. |
-
-### Prior session (commit `4f8ff3f`, 2026-05-22 morning)
-
-| File | Change |
-|------|--------|
-| `scripts/train_regime.py` | Feature variance gate, 3-fold walk-forward CV, feature importance logging, `--max-rows N` flag. |
-| `scripts/regime_health_check.py` | **NEW.** Diagnostic script for training progress, staleness rate, model health. |
+| `btc_kalshi_system/data/derivatives_feed.py` | Coinglass + Kraken fallbacks, LKG key write, TTL=600s, overlapping 240s refresh, `_funding_rate_trend` zero fallback. |
+| `btc_kalshi_system/signal/fusion.py` | `TradingSignal` carries `regime_features` + `features_stale`. Gate 2 soft-launch. LKG stale detection. |
+| `main.py` | LKG fallback in `_get_market_context`. Loguru `enqueue=True, catch=True`. `_regime_watchdog`. 23-column schema. Idempotent ALTER TABLE. |
+| `config.py` | `REGIME_MODEL_PATH`, `REGIME_GATE2_ENFORCING`, `COINGLASS_API_KEY`. |
+| `scripts/train_regime.py` | Feature variance gate, 3-fold walk-forward CV, feature importance logging, `--max-rows`. |
+| `scripts/regime_health_check.py` | **NEW.** Diagnostic: training progress, staleness rate, feature variance, model health. |
 | `scripts/auto_retrain.py` | **NEW.** Cron-driven retraining with emergency/row/time triggers. |
-| `btc_kalshi_system/data/derivatives_feed.py` | `_funding_rate_trend` fallback: `return 0.0`. |
-| `tests/data/test_derivatives_feed.py` | +1 test for funding_rate_trend zero fallback. |
-
-### Prior session (commit `d3933be`, 2026-05-21)
-
-| File | Change |
-|------|--------|
-| `btc_kalshi_system/signal/fusion.py` | `TradingSignal` carries `regime_features` + `features_stale`. Gate 2 soft-launch. |
-| `btc_kalshi_system/models/regime_model.py` | `train()` accepts `**xgb_kwargs`. |
-| `main.py` | 23-column schema, idempotent ALTER TABLE, regime feature persistence, `RegimeModel.load()` fallback. |
-| `config.py` | `REGIME_MODEL_PATH`, `REGIME_GATE2_ENFORCING`. |
 
 ---
 
 ## Next Steps
 
-1. **Restart the bot** to pick up this session's changes (loguru hardening,
-   overlapping refresh, watchdog). Confirm watchdog is logging TTL checks and
-   that no macOS notifications fire immediately after startup.
+1. **Monitor training-ready row accumulation.** Run `python3 scripts/regime_health_check.py`
+   daily. Currently at 128/500 (~7.8 days to go at 48/day). Check `pgrep -af main.py` to
+   confirm only one process is running.
 
-2. **Monitor training-ready row accumulation.** Run `python3 scripts/regime_health_check.py`
-   daily. Expect 500 rows ~2026-06-07 at current rate.
+2. **Consider a CVD soft gate (early regime signal).** Add a check in `_process_market`:
+   if `cvd_normalized < -0.3` skip YES→UP entries; if `cvd_normalized > +0.3` skip NO→DOWN.
+   This is a simplified preview of what Gate 2 will do. Would have prevented the majority
+   of today's losses. Discuss before implementing — it reduces training data diversity.
 
-3. **(Optional) Add auto_retrain to crontab.** Copy the crontab line from the top
-   of `scripts/auto_retrain.py`. Test first with `python3 scripts/auto_retrain.py --dry-run`.
+3. **Add auto_retrain to crontab.** Copy the crontab line from the top of
+   `scripts/auto_retrain.py`. Test first with `python3 scripts/auto_retrain.py --dry-run`.
 
-4. **Train the model when ready.** `python3 scripts/train_regime.py --dry-run`
-   previews Brier / accuracy. If sane (Brier < 0.25, Kronos agreement > 55%),
-   re-run without `--dry-run` to save `models/regime.pkl`. Restart — it auto-loads.
+4. **Train the model when ready.** `python3 scripts/train_regime.py --dry-run` previews
+   Brier / accuracy. If sane (Brier < 0.25, Kronos agreement > 55%), re-run without
+   `--dry-run` to save `models/regime.pkl`. Restart — it auto-loads.
 
-5. **Flip `REGIME_GATE2_ENFORCING=true` in `.env` and restart** after observing
-   ~50 shadow trades with a 20-40% disagreement rate (not 50%+).
+5. **Flip `REGIME_GATE2_ENFORCING=true` in `.env` and restart** after observing ~50
+   shadow trades with a 20-40% disagreement rate (not 50%+).
 
 ---
 
 ## Context / Gotchas
 
 - **Test suite invariant: 207 pass.** Run from project root: `python3 -m pytest`.
-- **Bot must be restarted** for this session's changes to take effect.
-- **Watchdog uses whatever redis client is available on existing KronosV2 instance
-  variables** — do not add a second redis connection. Check `self._store._redis`
-  or equivalent.
-- **macOS notifications use `osascript`** — WARNING fires with sound "Basso",
-  ERROR fires with sound "Sosumi". If notifications stop appearing, check that
-  Terminal/Python has notification permissions in macOS System Settings.
+- **Check for stale processes before starting.** `ps aux | grep "[Pp]ython.*main\.py"` —
+  if more than one Python process appears, `kill -9` all but the newest. `pgrep -af main.py`
+  returns false positives (matches shell wrappers). Use `ps aux` for reliability.
+- **Per-side cap is Redis-backed.** `ticker_direction_count` reads `portfolio:open_positions`
+  hash directly. Accurate across all processes. Do not revert to in-memory count.
+- **20¢ floor is checked before Kelly sizing.** If entry price < 20¢, the trade is skipped
+  entirely — no Kelly calculation, no checklist run.
+- **CVD does NOT influence Kronos decisions in bootstrap mode.** CVD is logged to SQLite
+  for regime model training only. Kronos fires on Monte Carlo (BRTI candle price momentum).
+  This is why CVD divergence causes multi-trade loss streaks. The regime model (Gate 2) is
+  the fix.
+- **`floor_strike` is set by Kalshi at market open.** It equals the BRTI average at open.
+  For KXBTC15M markets it is always non-zero once the market opens. The `> 0` guard only
+  catches markets polled before open. BRTI candle fallback now logs a WARNING when hit.
+- **Label = `int(direction == outcome)`, NOT `outcome`.** `outcome` = did trade win.
+  For NO→DOWN wins, `outcome=1` but `direction=0`, so label = 0. All evaluation uses this.
+- **Two `brti_volatility_1h` implementations exist.** `DerivativesFeed` (Redis ticks) vs
+  `fusion._regime_features()` (5-min OHLCV pct_change). Persisted column is fusion version.
+  Do not consolidate after model training begins — it invalidates trained models.
 - **Kronos preload rule.** Apple Silicon segfault avoidance: preload Kronos in
-  `KronosV2.__init__()` before asyncio, `map_location="cpu"`, `set_num_threads(1)`
-  BEFORE `from_pretrained`. Do not refactor.
-- **Label = `int(direction == outcome)`, NOT `outcome`.** `outcome` means "did
-  this trade win," inverted for short trades. All evaluation code uses this formula.
-- **Two `brti_volatility_1h` implementations exist.** `DerivativesFeed` (Redis
-  ticks) vs `fusion._regime_features()` (5-min OHLCV pct_change). Persisted column
-  is the fusion version. Do not consolidate after model training begins.
-- **CV fold windows must stay out of the held-out test set.** Folds are computed
-  on `n_cv = n_total - args.test_size` rows, not all rows.
-- **`_TRAINING_READY_FILTER` in auto_retrain.py uses the looser 3-condition
-  filter** (`features_stale=0, funding_rate IS NOT NULL, outcome IS NOT NULL`) —
-  not the strict 6-column filter.
-- **Gate 2 starts in SHADOW mode after loading a model.** Set
-  `REGIME_GATE2_ENFORCING=true` only after observing ~50 trades. Default `false`.
-- **Always check for stale main.py processes before starting.** Run `pgrep -af main.py`
-  — if more than one appears, `kill -9` all but the newest, then restart so it reloads
-  Redis cleanly. Stale processes from prior sessions persist indefinitely and each
-  maintains its own in-memory position state, breaking the per-ticker cap.
-- **`dump.rdb` is in git but must NOT be staged in commits.** Stage code files
-  explicitly. Same for `trades.db.bak.*`.
-- **`prev_oi` in `DerivativesFeed` is an instance attribute.** One false-zero
-  `oi_delta_pct` on cold start is expected and harmless.
-- **LKG sentinel `_lkg=True` in market context dict.** When `_get_market_context()`
-  falls back to `regime:features:lkg`, it injects `_lkg=True` into the returned dict.
-  `fusion._regime_features()` checks `ctx.get("_lkg", False)` to force `stale=True`.
-  The `_lkg` and `_lkg_written_at` keys are never included in the 6-feature dict fed to
-  XGBoost — the feature dict is built by explicitly listing the 6 keys. Do not add
-  `_lkg` to the feature list or it will corrupt model inputs.
-- **Calibrator is independent.** Uses only `kronos_raw + outcome`, not regime
-  features. Hits its 500-sample threshold separately.
-- **DeepSeek `NEUTRAL_DEFAULT` on 402, not `SAFE_DEFAULT`.**
-- **`_RANGING_SHRINK = 0.7`, `_BOOTSTRAP_SHRINK = 0.8`, `_UNCERTAINTY_SHRINK =
-  0.5`** in `fusion.py`. Bootstrap shrink is intentionally lighter than uncertainty
-  shrink. Do not equate.
-- **15-min reference price = last completed 15-min BRTI candle close.** Do not
-  revert to `composite_price`.
+  `KronosV2.__init__()` before asyncio, `map_location="cpu"`, `set_num_threads(1)` BEFORE
+  `from_pretrained`. Do not refactor.
+- **Gate 2 starts in SHADOW mode after loading a model.** Set `REGIME_GATE2_ENFORCING=true`
+  only after observing ~50 trades. Default `false`.
+- **LKG sentinel `_lkg=True` in market context dict.** Never add `_lkg` or `_lkg_written_at`
+  to the 6-feature list — it will corrupt XGBoost model inputs.
+- **`dump.rdb` and `trades.db.bak.*` must NOT be committed.** Stage code files explicitly.
+- **Calibrator is independent.** Uses only `kronos_raw + outcome`, not regime features.
+  Hits its 500-sample threshold separately from the regime model.
 - **Gate 6 is skipped for `timeframe == "15min"`.**
 - **RSA-PSS Kalshi signing, sign path-only.**
-- **Coinglass fallback requires `COINGLASS_API_KEY` in `.env`** (`CG-API-KEY` header, v4 API). Without it, the Coinglass fallback logs a WARNING and returns zeros — OKX must recover on its own. Endpoint used: `/api/futures/funding-rate/history` (OKX, BTCUSDT, 8h interval) + `/api/futures/open-interest/exchange-list` (BTC). OI is filtered for `exchange=="OKX"` to stay on the same unit scale as the primary path.
-- **Kraken fallback uses spot `BTC/USD` trades** (not a perp). CVD and basis_spread_pct still computed correctly — spot price ≈ BRTI so basis ≈ 0. No API key required.
+- **Coinglass fallback requires `COINGLASS_API_KEY` in `.env`.** Without it, logs WARNING
+  and returns zeros. Kraken fallback uses spot BTC/USD — no API key required.
+- **`RANGING_SHRINK=0.7`, `_BOOTSTRAP_SHRINK=0.8`, `_UNCERTAINTY_SHRINK=0.5`** in
+  `fusion.py`. Do not equate bootstrap and uncertainty shrinks.
+- **DeepSeek `NEUTRAL_DEFAULT` on 402, not `SAFE_DEFAULT`.**
