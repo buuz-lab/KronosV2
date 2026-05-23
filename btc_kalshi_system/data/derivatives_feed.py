@@ -65,10 +65,14 @@ class DerivativesFeed:
     async def run(self) -> None:
         """Refresh features every 5 minutes indefinitely."""
         try:
-            if not await self._resolve_exchange():
-                # No exchange available — run a no-op loop so gather() doesn't crash
-                while True:
-                    await asyncio.sleep(_REFRESH_INTERVAL)
+            while not await self._resolve_exchange():
+                # No exchange available on startup — keep retrying rather than
+                # running a permanent no-op loop. OKX may come back up.
+                logger.warning(
+                    "DerivativesFeed: no exchange available at startup — "
+                    f"retrying in {_REFRESH_INTERVAL}s"
+                )
+                await asyncio.sleep(_REFRESH_INTERVAL)
 
             while True:
                 success = False
@@ -85,7 +89,15 @@ class DerivativesFeed:
                         await self._exchange.close()
                         self._exchange = None
                         if not await self._resolve_exchange():
-                            break
+                            # All exchanges unavailable right now — don't exit, keep
+                            # retrying so a temporary OKX maintenance window doesn't
+                            # permanently kill the feed for the rest of the session.
+                            logger.warning(
+                                "DerivativesFeed: all exchanges unavailable — "
+                                f"will retry in {_REFRESH_INTERVAL}s"
+                            )
+                            await asyncio.sleep(_REFRESH_INTERVAL)
+                            continue
                 # On success, refresh 60s early so the key (TTL=600s) is always
                 # renewed with headroom to spare even if the fetch runs long.
                 # On failure, wait the full interval before retrying.
