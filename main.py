@@ -25,6 +25,7 @@ from btc_kalshi_system.models.kronos_engine import KronosEngine
 from btc_kalshi_system.models.regime_model import RegimeModel
 from btc_kalshi_system.portfolio.circuit_breaker import CircuitBreaker
 from btc_kalshi_system.portfolio.monitor import OpenPosition, PortfolioMonitor
+from btc_kalshi_system.signal.calibration_drift_monitor import CalibrationDriftMonitor
 from btc_kalshi_system.signal.edge_tracker import EdgeTracker
 from btc_kalshi_system.signal.fusion import SignalFusionEngine
 import config
@@ -170,6 +171,7 @@ class KronosV2:
             deepseek_parser=self._deepseek,
         )
         self._edge_tracker = EdgeTracker()
+        self._drift_monitor = CalibrationDriftMonitor()
         self._kelly = KellySizer()
         self._checklist = PreTradeChecklist(self._kelly)
         self._router = KalshiClientRouter()
@@ -799,6 +801,13 @@ class KronosV2:
                     outcome=outcome,
                     market_price=position.entry_price_cents / 100,
                 )
+                self._drift_monitor.record(position.calibrated_prob, outcome)
+                if self._drift_monitor.is_drifting():
+                    logger.warning(
+                        f"CalibrationDriftMonitor: drift detected — "
+                        f"current_brier={self._drift_monitor.current_brier():.4f} "
+                        f"baseline={self._drift_monitor.baseline_brier():.4f}"
+                    )
 
                 try:
                     self._db.execute(
