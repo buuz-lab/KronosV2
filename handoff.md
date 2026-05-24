@@ -10,14 +10,14 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
-**As of 2026-05-24 session 2: 12 training-ready 21-feature rows. System live and collecting.**
+**As of 2026-05-24 session 3: gate_rejections table live. 12 training-ready 21-feature rows. System live and collecting.**
 
 - `PAPER_TRADING=true` in `.env`
 - **~54 trades/day. 500 rows by ~June 2.**
 - Stats: 378 total trades, 207W/171L (54.7%), Net P&L: -$97.72
 - System running on PID 60865 — confirm: `ps aux | grep "[Pp]ython.*main\.py"`
 - Latest commit: `43f1c53` (main, pushed to GitHub)
-- Test suite: **275 passing**
+- Test suite: **279 passing**
 - Merged `feature/20-features-position-monitor` → `main` (fast-forward, 6 commits, 747 lines across 8 files). Restarted clean — DerivativesFeed writing all 21 features, paper trading mode active, no errors.
 
 **All phases complete:**
@@ -108,6 +108,16 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Files Touched This Session (2026-05-24)
 
+**Session 3 (gate_rejections):**
+
+| File | Change |
+|------|--------|
+| `main.py` | `_CREATE_GATE_REJECTIONS_TABLE` + `_GATE_REJECTIONS_COLUMN_MIGRATIONS`; init at startup; write row on checklist failure in `_process_market`; `_resolve_gate_rejections()` method; called from main loop |
+| `tests/execution/test_gate_rejections.py` | **New** — 4 TDD tests: write-on-failure, win resolution, loss resolution, young-row skip |
+| `handoff.md` | Session 3 update |
+
+**Session 2:**
+
 | File | Change |
 |------|--------|
 | `btc_kalshi_system/data/derivatives_feed.py` | Removed 403-only branch; re-resolve exchange on ANY fetch exception |
@@ -130,7 +140,7 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 |------|--------|
 | CalibrationDriftMonitor | ✅ COMPLETE — wired, tests passing |
 | StratifiedEdgeTracker | 🔄 IN PROGRESS — wired for observability; not yet gating |
-| Merge feature/20-features-position-monitor → main | ⬜ PENDING — restart main.py after merge |
+| Merge feature/20-features-position-monitor → main | ✅ COMPLETE — fast-forward merge, main.py restarted, all 21 features confirmed |
 
 ---
 

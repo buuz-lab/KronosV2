@@ -144,6 +144,26 @@ CREATE TABLE IF NOT EXISTS trade_snapshots (
 )
 """
 
+_CREATE_GATE_REJECTIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS gate_rejections (
+    rejection_id     TEXT PRIMARY KEY,
+    timestamp        REAL,
+    ticker           TEXT,
+    timeframe        TEXT,
+    direction        INTEGER,
+    failed_gate      INTEGER,
+    failed_reason    TEXT,
+    signal_prob      REAL,
+    deepseek_regime  TEXT,
+    kalshi_mid_cents INTEGER,
+    features         TEXT,
+    outcome          INTEGER DEFAULT NULL,
+    resolved_at      REAL DEFAULT NULL
+)
+"""
+
+_GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = []
+
 
 class KronosV2:
     def __init__(self) -> None:
@@ -218,6 +238,12 @@ class KronosV2:
                 # "duplicate column name" — column already exists. Safe to ignore.
                 pass
         self._db.execute(_CREATE_TRADE_SNAPSHOTS_TABLE)
+        self._db.execute(_CREATE_GATE_REJECTIONS_TABLE)
+        for col_name, col_def in _GATE_REJECTIONS_COLUMN_MIGRATIONS:
+            try:
+                self._db.execute(f"ALTER TABLE gate_rejections ADD COLUMN {col_name} {col_def}")
+            except sqlite3.OperationalError:
+                pass
         self._db.commit()
 
         self._running = False
@@ -340,6 +366,12 @@ class KronosV2:
         except Exception as exc:
             logger.error(f"Error checking resolutions: {exc}")
 
+        # 8. Resolve gate rejections (counterfactual outcomes)
+        try:
+            self._resolve_gate_rejections()
+        except Exception as exc:
+            logger.error(f"Error resolving gate rejections: {exc}")
+
     def _process_market(self, market: dict, composite_price: float) -> None:
         ticker = market.get("ticker", "")
         if not ticker:
@@ -411,6 +443,30 @@ class KronosV2:
         # g. Checklist failed
         if not result.passed:
             logger.info(f"Pre-trade checklist failed for {ticker} [gate {result.failed_gate}]: {result.failed_reason}")
+            try:
+                self._db.execute(
+                    """INSERT OR IGNORE INTO gate_rejections
+                       (rejection_id, timestamp, ticker, timeframe, direction,
+                        failed_gate, failed_reason, signal_prob, deepseek_regime,
+                        kalshi_mid_cents, features)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        str(uuid.uuid4()),
+                        time.time(),
+                        ticker,
+                        timeframe,
+                        signal.direction,
+                        result.failed_gate,
+                        result.failed_reason,
+                        signal.kronos_calibrated,
+                        signal.deepseek_regime,
+                        round(mid_cents),
+                        json.dumps(signal.regime_features or {}),
+                    ),
+                )
+                self._db.commit()
+            except sqlite3.Error as exc:
+                logger.error(f"SQLite gate_rejections insert failed for {ticker}: {exc}")
             return
 
         # h. Place order (or simulate in paper mode)
@@ -849,6 +905,56 @@ class KronosV2:
                 )
             except Exception as exc:
                 logger.warning(f"Failed to check resolution for {position.ticker}: {exc}")
+
+    def _resolve_gate_rejections(self) -> None:
+        cutoff = time.time() - 900  # only resolve rows ≥15 min old
+        age_out_cutoff = time.time() - self._MAX_POSITION_AGE_SECONDS
+
+        pending = self._db.execute(
+            """SELECT rejection_id, ticker, direction, timestamp, failed_gate
+               FROM gate_rejections
+               WHERE outcome IS NULL AND timestamp < ?""",
+            (cutoff,),
+        ).fetchall()
+
+        for rejection_id, ticker, direction, ts, failed_gate in pending:
+            try:
+                if ts < age_out_cutoff:
+                    self._db.execute(
+                        "UPDATE gate_rejections SET outcome=? WHERE rejection_id=?",
+                        (-1, rejection_id),
+                    )
+                    self._db.commit()
+                    logger.info(f"Gate rejection aged out: {ticker} rejection_id={rejection_id}")
+                    continue
+
+                resp = self._router._raw._request("GET", f"/trade-api/v2/markets/{ticker}")
+                market = resp.get("market", resp)
+                status = market.get("status", "")
+                if status != "finalized":
+                    continue
+
+                result = market.get("result", "")
+                if not result:
+                    continue
+
+                if result == "yes":
+                    outcome = 1 if direction == 1 else 0
+                else:
+                    outcome = 1 if direction == 0 else 0
+
+                resolved_at = time.time()
+                self._db.execute(
+                    "UPDATE gate_rejections SET outcome=?, resolved_at=? WHERE rejection_id=?",
+                    (outcome, resolved_at, rejection_id),
+                )
+                self._db.commit()
+                logger.info(
+                    f"Gate rejection resolved: {ticker} gate={failed_gate} "
+                    f"would_have={'WON' if outcome == 1 else 'LOST'}"
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to resolve gate rejection {rejection_id}: {exc}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
