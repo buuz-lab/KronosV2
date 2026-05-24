@@ -6,39 +6,40 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 up/down markets). Forecast direction via Kronos + XGBoost regime classifier +
 DeepSeek gate, size with fractional Kelly, run 6+ pre-trade gates.
 
-**Current focus:** Accumulate 500 new 20-feature training rows (~June 2), train and
+**Current focus:** Accumulate 500 new 21-feature training rows (~June 2), train and
 deploy the RegimeModel, then flip `PAPER_TRADING=false` and go live (~June 5–7).
 
 ---
 
 ## Current Progress
 
-**As of 2026-05-23 ~18:30 UTC: 0 training-ready 20-feature rows. System is live and collecting.**
+**As of 2026-05-24 ~01:00 UTC: 1 training-ready 21-feature row. System is live and collecting.**
 
 - `PAPER_TRADING=true` in `.env`
-- **~49 trades/day. Expected 500 new 20-feature rows by ~2026-06-02.**
-- Stats: 351 total trades / 0 training-ready 20-feature rows, 169W / 182L (48.1%), Net P&L: -$17.26
-- System is **running** on PID 47293 — confirm with `ps aux | grep "[Pp]ython.*main\.py"`
-- Latest commit: `bd80bc0`
+- **~52 trades/day. Expected 500 new 21-feature rows by ~2026-06-02.**
+- Stats: 366 total trades / 1 training-ready 21-feature row, 201W / 165L (54.9%), Net P&L: -$57.73
+- System is **running** on PID 51026 — confirm with `ps aux | grep "[Pp]ython.*main\.py"`
+- Latest commit: `6cd6f18`
 
-**Implementation complete (2026-05-23).** Phase 0 (CVD gate), Phase 1 (6→20 feature
-expansion), and Phase 2 (PositionMonitor) are all merged and live. System was restarted
-at ~18:30 UTC. New trades will accumulate with all 20 features. The CVD ring buffer
-requires 5 entries before `cvd_velocity`/`cvd_acceleration` are non-NULL — that means
-the first ~20 minutes of trades will have `features_stale=1` and be excluded from
-training. Existing 351 rows have NULLs for the 14 new columns and are excluded from
-20-feature training (use `--legacy` to train on 6-feature subset).
+**Implementation complete (2026-05-23).** Phase 0 (CVD gate), Phase 1 (6→21 feature
+expansion), Phase 2 (PositionMonitor), and Phase 2b (large_print_direction + Dynamic Kelly)
+are all merged and live. System was restarted at ~18:57 UTC. New trades will accumulate
+with all 21 features. The CVD ring buffer requires 5 entries before
+`cvd_velocity`/`cvd_acceleration` are non-NULL — the first ~20 minutes after restart
+have `features_stale=1` and are excluded from training. Existing rows have NULLs for
+`large_print_direction` and are excluded from 21-feature training (use `--legacy` to
+train on the 6-feature subset).
 
 **Go-live thresholds (both must be met):**
-- ≥ 500 resolved trades total → calibrator (already met: 351 → will hit ~500 by ~May 27)
-- ≥ 500 new 20-feature training rows → regime model (~June 2)
+- ≥ 500 resolved trades total → calibrator (already met: 366 → hit ~500 by ~May 27)
+- ≥ 500 new 21-feature training rows → regime model (~June 2)
 
 **Timeline:**
 | Date | Milestone |
 |------|-----------|
-| May 23 (today) | Implementation complete, system restarted, 20-feature collection begins |
+| May 23 | Implementation complete, system restarted, 21-feature collection begins |
 | ~May 26–27 | 500 total trades → train calibrator |
-| ~June 2–3 | 500 new 20-feature rows → `python3 scripts/train_regime.py` |
+| ~June 2–3 | 500 new 21-feature rows → `python3 scripts/train_regime.py` |
 | ~June 2–3 | Deploy regime model → flip `REGIME_GATE2_ENFORCING=true`, PositionMonitor exit becomes active |
 | ~June 5–7 | ~50 shadow trades observed → flip `PAPER_TRADING=false` |
 
@@ -236,32 +237,32 @@ samples. Do not remove the Gate 6 guard in the meantime.
 
 ## Next Steps
 
-1. **Monitor 20-feature row accumulation.** Run `python3 scripts/regime_health_check.py`
+1. **Monitor 21-feature row accumulation.** Run `python3 scripts/regime_health_check.py`
    daily (or query directly):
    ```sql
    SELECT COUNT(*) FROM trades
    WHERE cvd_velocity IS NOT NULL AND brti_momentum_5min IS NOT NULL
-     AND kalshi_implied_prob IS NOT NULL AND outcome IS NOT NULL;
+     AND kalshi_implied_prob IS NOT NULL AND large_print_direction IS NOT NULL
+     AND outcome IS NOT NULL;
    ```
    Need 500. Target: ~June 2.
 
 2. **Train calibrator when total trades ≥ 500.** (~May 26–27 at current rate.)
    Update calibration in config or script — exact steps TBD based on calibrator implementation.
 
-3. **Train the regime model when 20-feature rows ≥ 500.**
+3. **Train the regime model when 21-feature rows ≥ 500.**
    `python3 scripts/train_regime.py --dry-run` — check Brier < 0.25, Kronos agreement > 55%.
    If sane, re-run without `--dry-run` → saves `models/regime.pkl`.
    Restart main.py → model auto-loads. Gate 2 runs in shadow mode by default.
    Flip `REGIME_GATE2_ENFORCING=true` after ~50 shadow trades.
 
-4. **Early experimentation option:** If you want to train on the existing 351 6-feature rows:
+4. **Early experimentation option:** If you want to train on the existing 6-feature rows:
    `python3 scripts/train_regime.py --legacy` — uses only original 6 features.
    Not recommended for deployment but useful for sanity-checking the pipeline.
 
 5. **After regime model is live: implement deferred SLY features.**
-   Priority order: (a) Kalshi intra-cycle YES momentum (new polling), (b) large print
-   direction (after verifying per-trade volume flows through CVD — see memory flag),
-   (c) dynamic Kelly with position scoring, (d) slippage gate for 15min markets.
+   Priority order: (a) Kalshi intra-cycle YES momentum (new polling),
+   (b) slippage gate for 15min markets.
 
 ---
 
