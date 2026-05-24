@@ -17,7 +17,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 - Stats: 378 total trades, 207W/171L (54.7%), Net P&L: -$97.72
 - System running on PID 60865 — confirm: `ps aux | grep "[Pp]ython.*main\.py"`
 - Latest commit: `43f1c53` (main, pushed to GitHub)
-- Test suite: **279 passing**
+- Test suite: **280 passing**
 - Merged `feature/20-features-position-monitor` → `main` (fast-forward, 6 commits, 747 lines across 8 files). Restarted clean — DerivativesFeed writing all 21 features, paper trading mode active, no errors.
 
 **All phases complete:**
@@ -112,9 +112,14 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 | File | Change |
 |------|--------|
-| `main.py` | `_CREATE_GATE_REJECTIONS_TABLE` + `_GATE_REJECTIONS_COLUMN_MIGRATIONS`; init at startup; write row on checklist failure in `_process_market`; `_resolve_gate_rejections()` method; called from main loop |
-| `tests/execution/test_gate_rejections.py` | **New** — 4 TDD tests: write-on-failure, win resolution, loss resolution, young-row skip |
+| `main.py` | `_CREATE_GATE_REJECTIONS_TABLE` + `_GATE_REJECTIONS_COLUMN_MIGRATIONS` (includes `aged_out INTEGER DEFAULT 0` migration); init at startup; write row on checklist failure in `_process_market`; `_resolve_gate_rejections()` with `aged_out=1` age-out (outcome stays NULL), `aged_out = 0` filter + `LIMIT 50` on resolution query; called from main loop |
+| `tests/execution/test_gate_rejections.py` | **New** — 5 TDD tests: write-on-failure, win resolution, loss resolution, young-row skip, age-out flag |
 | `handoff.md` | Session 3 update |
+
+**gate_rejections design notes:**
+- `outcome` is NULL for aged-out rows — use `WHERE aged_out = 0` to filter them out of analysis
+- `aged_out = 0` filter on resolution SELECT prevents re-querying aged rows; `LIMIT 50` bounds API calls on first run
+- New `aged_out` column arrives via `_GATE_REJECTIONS_COLUMN_MIGRATIONS` (idempotent ALTER TABLE), not in `_CREATE_GATE_REJECTIONS_TABLE` — safe on existing DBs
 
 **Session 2:**
 

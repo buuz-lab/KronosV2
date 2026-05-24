@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS gate_rejections (
     kalshi_mid_cents INTEGER,
     features        TEXT,
     outcome         INTEGER DEFAULT NULL,
-    resolved_at     REAL DEFAULT NULL
+    resolved_at     REAL DEFAULT NULL,
+    aged_out        INTEGER DEFAULT 0
 )
 """
 
@@ -150,16 +151,18 @@ def test_gate_failure_writes_rejection_row():
     rows = db.execute("SELECT * FROM gate_rejections").fetchall()
     assert len(rows) == 1, "Expected exactly one gate_rejections row"
 
-    (rejection_id, ts, ticker, timeframe, direction,
-     failed_gate, failed_reason, signal_prob, deepseek_regime,
-     kalshi_mid_cents, features_json, outcome, resolved_at) = rows[0]
+    row = db.execute(
+        """SELECT ticker, direction, failed_gate, failed_reason, features, outcome, resolved_at
+           FROM gate_rejections"""
+    ).fetchone()
+    ticker_val, direction_val, failed_gate_val, failed_reason_val, features_json, outcome_val, resolved_at_val = row
 
-    assert ticker == "KXBTC15M-25MAY24-T96250"
-    assert direction == 1
-    assert failed_gate == 3
-    assert "Exposure" in failed_reason
-    assert outcome is None
-    assert resolved_at is None
+    assert ticker_val == "KXBTC15M-25MAY24-T96250"
+    assert direction_val == 1
+    assert failed_gate_val == 3
+    assert "Exposure" in failed_reason_val
+    assert outcome_val is None
+    assert resolved_at_val is None
 
     features = json.loads(features_json)
     assert "cvd_normalized" in features
@@ -231,7 +234,28 @@ def test_resolve_skips_rows_younger_than_900s():
     trader._resolve_gate_rejections()
 
     row = db.execute(
-        "SELECT outcome FROM gate_rejections WHERE rejection_id=?",
+        "SELECT outcome, aged_out FROM gate_rejections WHERE rejection_id=?",
         (rejection_id,),
     ).fetchone()
     assert row[0] is None, "Row younger than 900s must remain unresolved (outcome=NULL)"
+    assert row[1] == 0, "aged_out must stay 0 for a young unresolved row"
+
+
+# ── Test 5: age-out sets aged_out=1, outcome stays NULL ──────────────────────
+
+def test_aged_out_row_sets_flag_not_outcome():
+    """Rows older than MAX_POSITION_AGE_SECONDS get aged_out=1; outcome stays NULL."""
+    db = _make_db()
+    trader = _make_trader(db)
+
+    # 90000s > 86400s (_MAX_POSITION_AGE_SECONDS), so age-out fires
+    rejection_id = _insert_pending_rejection(db, direction=1, age_seconds=90000.0)
+
+    trader._resolve_gate_rejections()
+
+    row = db.execute(
+        "SELECT outcome, aged_out FROM gate_rejections WHERE rejection_id=?",
+        (rejection_id,),
+    ).fetchone()
+    assert row[0] is None, "aged-out row must keep outcome=NULL (not a sentinel value)"
+    assert row[1] == 1, "aged_out must be set to 1"

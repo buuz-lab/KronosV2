@@ -162,7 +162,9 @@ CREATE TABLE IF NOT EXISTS gate_rejections (
 )
 """
 
-_GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = []
+_GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("aged_out", "INTEGER DEFAULT 0"),
+]
 
 
 class KronosV2:
@@ -913,7 +915,8 @@ class KronosV2:
         pending = self._db.execute(
             """SELECT rejection_id, ticker, direction, timestamp, failed_gate
                FROM gate_rejections
-               WHERE outcome IS NULL AND timestamp < ?""",
+               WHERE outcome IS NULL AND aged_out = 0 AND timestamp < ?
+               LIMIT 50""",
             (cutoff,),
         ).fetchall()
 
@@ -921,8 +924,8 @@ class KronosV2:
             try:
                 if ts < age_out_cutoff:
                     self._db.execute(
-                        "UPDATE gate_rejections SET outcome=? WHERE rejection_id=?",
-                        (-1, rejection_id),
+                        "UPDATE gate_rejections SET aged_out=1 WHERE rejection_id=?",
+                        (rejection_id,),
                     )
                     self._db.commit()
                     logger.info(f"Gate rejection aged out: {ticker} rejection_id={rejection_id}")
