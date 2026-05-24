@@ -803,10 +803,12 @@ class KronosV2:
                 )
                 self._drift_monitor.record(position.calibrated_prob, outcome)
                 if self._drift_monitor.is_drifting():
+                    _baseline = self._drift_monitor.baseline_brier()
+                    _baseline_str = f"{_baseline:.4f}" if _baseline is not None else "unknown"
                     logger.warning(
                         f"CalibrationDriftMonitor: drift detected — "
                         f"current_brier={self._drift_monitor.current_brier():.4f} "
-                        f"baseline={self._drift_monitor.baseline_brier():.4f}"
+                        f"baseline={_baseline_str}"
                     )
 
                 try:

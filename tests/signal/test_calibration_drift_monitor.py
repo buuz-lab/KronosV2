@@ -6,6 +6,7 @@ Uses fakeredis so no live Redis is needed.
 
 import math
 from collections import deque
+from unittest.mock import patch
 
 import fakeredis
 import pytest
@@ -145,3 +146,31 @@ def test_current_brier_zero_before_window_fills():
     # Exactly at window fill it should return the actual score
     monitor.record(calibrated_prob=0.5, outcome=1)
     assert monitor.current_brier() == pytest.approx(0.25)
+
+
+# ── Test 6 ─────────────────────────────────────────────────────────────────────
+
+def test_persistence_survives_restart():
+    """Redis persistence survives restart — total_count and history are restored."""
+    fake_redis = fakeredis.FakeRedis(decode_responses=True)
+
+    # First monitor instance — record 15 trades
+    with patch("redis.from_url", return_value=fake_redis):
+        monitor1 = CalibrationDriftMonitor()
+        # Record 15 trades with prob=0.5, outcome=1 (Brier = 0.25 each)
+        for _ in range(15):
+            monitor1.record(0.5, 1)
+        assert monitor1.baseline_brier() is None  # window not filled yet
+
+    # Second monitor instance — same Redis backend
+    with patch("redis.from_url", return_value=fake_redis):
+        monitor2 = CalibrationDriftMonitor()  # new instance, same Redis
+        # Record 5 more to complete the window of 20
+        for _ in range(5):
+            monitor2.record(0.5, 1)
+        # Window completed: baseline must be set
+        assert monitor2.baseline_brier() is not None
+        assert monitor2.baseline_brier() == pytest.approx(0.25)
+        # No spurious alert on window boundary
+        assert monitor2.is_drifting() is False
+        assert int(monitor2._redis.get(_KEY_ALERT_COUNT)) == 0
