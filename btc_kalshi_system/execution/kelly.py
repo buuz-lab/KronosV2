@@ -9,8 +9,8 @@ KELLY_CHOP_THRESHOLD  = 0.15
 KELLY_CHOP_SHRINK     = 0.70
 KELLY_TAPE_THRESHOLD  = 0.20
 KELLY_TAPE_SHRINK     = 0.80
-KELLY_STREAK_THRESHOLD = 3
-KELLY_STREAK_SHRINK   = 0.60
+KELLY_STREAK_FLOOR    = 0.60
+KELLY_STREAK_STEP     = 0.08
 
 
 class KellySizer:
@@ -44,8 +44,8 @@ class KellySizer:
                 size *= KELLY_CHOP_SHRINK
             if regime_features.get("tape_speed_tpm", 1.0) < KELLY_TAPE_THRESHOLD:
                 size *= KELLY_TAPE_SHRINK
-        if loss_streak >= KELLY_STREAK_THRESHOLD:
-            size *= KELLY_STREAK_SHRINK
+        if loss_streak > 0:
+            size *= max(KELLY_STREAK_FLOOR, 1.0 - max(0, loss_streak - 1) * KELLY_STREAK_STEP)
 
         return max(size, 0.0)
 

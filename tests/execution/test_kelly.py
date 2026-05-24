@@ -133,28 +133,54 @@ def test_tape_shrink_does_not_fire_when_tpm_at_threshold(sizer):
     assert math.isclose(no_shrink, base, rel_tol=1e-9)
 
 
-def test_streak_shrink_fires_at_exactly_three(sizer):
-    # loss_streak = 3 >= KELLY_STREAK_THRESHOLD 3 → shrink × 0.60
+def test_streak_no_shrink_at_zero(sizer):
+    base = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False)
+    result = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False,
+                                loss_streak=0)
+    assert math.isclose(result, base, rel_tol=1e-9)
+
+
+def test_streak_no_shrink_at_one(sizer):
+    base = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False)
+    result = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False,
+                                loss_streak=1)
+    assert math.isclose(result, base, rel_tol=1e-9)
+
+
+def test_streak_shrink_at_two(sizer):
+    base = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False)
+    shrunk = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False,
+                                loss_streak=2)
+    assert math.isclose(shrunk, base * 0.92, rel_tol=1e-9)
+
+
+def test_streak_shrink_at_three(sizer):
     base = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False)
     shrunk = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False,
                                 loss_streak=3)
+    assert math.isclose(shrunk, base * 0.84, rel_tol=1e-9)
+
+
+def test_streak_shrink_floor_at_six(sizer):
+    base = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False)
+    shrunk = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False,
+                                loss_streak=6)
     assert math.isclose(shrunk, base * 0.60, rel_tol=1e-9)
 
 
-def test_streak_shrink_does_not_fire_at_two(sizer):
-    # loss_streak = 2 < 3 → no shrink
+def test_streak_shrink_floor_holds_above_six(sizer):
     base = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False)
-    no_shrink = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False,
-                                   loss_streak=2)
-    assert math.isclose(no_shrink, base, rel_tol=1e-9)
+    shrunk = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False,
+                                loss_streak=10)
+    assert math.isclose(shrunk, base * 0.60, rel_tol=1e-9)
 
 
 def test_all_three_shrinks_stack_multiplicatively(sizer):
-    # chop × 0.70, tape × 0.80, streak × 0.60 = 0.336×
+    # chop × 0.70, tape × 0.80, streak-3 × 0.84 = 0.4704×
     base = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False)
     all_shrunk = sizer.compute_size(
         prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False,
         regime_features={"range_breakout_flag": 0.05, "tape_speed_tpm": 0.10},
         loss_streak=3,
     )
-    assert math.isclose(all_shrunk, base * 0.70 * 0.80 * 0.60, rel_tol=1e-9)
+    assert math.isclose(all_shrunk, base * 0.70 * 0.80 * 0.84, rel_tol=1e-9)

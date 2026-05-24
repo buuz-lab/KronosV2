@@ -778,10 +778,14 @@ class KronosV2:
                 else:
                     outcome = 1 if position.direction == 0 else 0
 
+                LOSS_STREAK_TTL = 86400  # 24 hours
                 if outcome == 1:  # win
-                    self._redis.delete("trading:loss_streak")
+                    current = int(self._redis.get("trading:loss_streak") or 0)
+                    if current > 0:
+                        self._redis.set("trading:loss_streak", current - 1, ex=LOSS_STREAK_TTL)
                 else:             # loss
                     self._redis.incr("trading:loss_streak")
+                    self._redis.expire("trading:loss_streak", LOSS_STREAK_TTL)
 
                 resolved_at = time.time()
                 trade = self._monitor.resolve_trade(
