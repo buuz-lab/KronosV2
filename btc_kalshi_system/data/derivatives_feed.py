@@ -85,7 +85,8 @@ class DerivativesFeed:
                     logger.warning(f"DerivativesFeed: fetch failed ({self._exchange_name}): {exc}")
                     # Any failure may indicate a dead session (timeout, reset, rate limit,
                     # geo-block, etc.) — always close and re-resolve to get a fresh instance.
-                    await self._exchange.close()
+                    if self._exchange is not None:
+                        await self._exchange.close()
                     self._exchange = None
                     if not await self._resolve_exchange():
                         # All exchanges unavailable right now — don't exit, keep
