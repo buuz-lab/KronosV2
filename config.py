@@ -21,6 +21,8 @@ OHLCV_TIMEFRAMES: list[str] = ["5min", "15min", "1h"]
 
 CF_BENCHMARKS_API_KEY: str = os.getenv("CF_BENCHMARKS_API_KEY", "")
 COINGLASS_API_KEY: str = os.getenv("COINGLASS_API_KEY", "")
+HYPERLIQUID_BASE_URL: str = "https://api.hyperliquid.xyz"
+KRAKEN_FUTURES_BASE_URL: str = "https://futures.kraken.com/derivatives/api/v3"
 
 KALSHI_API_KEY_ID: str = os.getenv("KALSHI_API_KEY_ID", "")
 KALSHI_PRIVATE_KEY_PATH: str = os.getenv("KALSHI_PRIVATE_KEY_PATH", "./keys/kalshi_private.key")
