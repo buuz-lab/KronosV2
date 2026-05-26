@@ -572,7 +572,7 @@ class KronosV2:
 
         fresh_kalshi_mid1 = (best_bid_cents + best_ask_cents) / 200.0
         dir_win_rate = self._dir_tracker.get_win_rate(signal.direction)
-        is_bootstrap = self._regime_model._clf is None
+        is_bootstrap = self._regime._clf is None
         result = self._checklist.run(
             signal=signal,
             best_ask_cents=best_ask_cents,
