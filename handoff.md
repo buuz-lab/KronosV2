@@ -10,7 +10,17 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
-**As of 2026-05-26 session 11 (post-deploy hotfix): DerivativesFeed OKX re-resolve bug fixed. 362 tests pass.**
+**As of 2026-05-26 session 11 (post-deploy): Bootstrap 1-contract floor deployed. DerivativesFeed OKX re-resolve bug fixed. 365 tests pass.**
+
+**Session 11 bootstrap floor: Gate 2 chicken-and-egg deadlock resolved**
+
+Regime model needs trades to accumulate training data, but Kelly rounds to 0 on thin edges in bootstrap mode (stacked chop/tape/direction_win_rate shrinks), blocking trades entirely. Fixed by adding an `is_bootstrap` flag to `PreTradeChecklist.run()`. When `is_bootstrap=True` (i.e., `regime_model._clf is None`), `kelly_dollars > 0`, and `25 ≤ trade_price_cents ≤ 75`:
+- Floor forces `kelly_contracts = 1` at all three rounding checkpoints (initial sizing, Gate 8b, drift shrink)
+- Price range guard excludes bad risk/reward extremes (>75¢ or <25¢ prices)
+- Gate 8, Gate 7, circuit breaker all still apply — only Gate 2 gets floored
+- `is_bootstrap = (self._regime_model._clf is None)` set in `main.py` before both checklist calls
+
+Commit `0e7e137`. 3 new tests added.
 
 **Session 11 hotfix: DerivativesFeed OKX exchange stuck as None**
 
