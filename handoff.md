@@ -10,7 +10,29 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
-**As of 2026-05-26 session 11 (post-deploy): Bootstrap 1-contract floor deployed. DerivativesFeed OKX re-resolve bug fixed. 365 tests pass.**
+**As of 2026-05-26 session 12 (post-deploy): Edge-flip shadow mode live. Gate 2a price floor added. KronosEngine candle_freq param added. 368 tests pass.**
+
+**Session 12: Edge-flip direction shadow mode (Gate 9)**
+
+Discovered that the fusion sets `direction = 1 if combined_prob >= 0.5 else 0` without considering market price. When Kronos says 55.8% YES but the market prices YES at 72–76¢, the edge for YES is negative (Kelly→0, blocked). The positive edge is actually on the NO side (NO at 24–28¢, win_prob=44.2%, edge=+16–20%). The system was never evaluating this.
+
+Historical data confirmed: 50–60% Kronos prob bucket had only 31.6% win rate (19 trades) — below 50% — consistent with the system fighting markets that have already priced in the move.
+
+Fix (shadow mode, not live): After any Gate 2 "Kelly rounds to 0" failure, compute whether the flipped direction has positive edge AND meets the ≥20¢ price floor. If so, insert a `gate_rejections` row with:
+- `direction = flipped_dir` (opposite of fusion signal)
+- `failed_gate = 9` (edge-flip shadow gate)
+- `shadow = 2` (excluded from training; distinct from shadow=1 Gate 7 rows)
+- `failed_reason` records original direction prob vs price, flipped direction edge
+
+Resolution logic unchanged — outcomes tracked same as other gate_rejections rows. Once win rate is confirmed positive over ~50+ resolved shadow rows, the fix goes live by adding market-price-aware direction selection before the checklist.
+
+**Session 12: Gate 2a minimum price floor (20¢)**
+
+Depth failures at 2–9¢ markets: Kelly requested 100–400 contracts (even a $8 bet at 2¢ = 400 contracts). Historical data: 0W/10L at ≤18¢ fill price. Added `_MIN_TRADE_PRICE_CENTS = 20` check in `pretrade_checklist.py` before Kelly runs. Commit `072e087`.
+
+**Session 12: KronosEngine configurable candle_freq**
+
+Prediction horizon mismatch: `run_monte_carlo()` used 5-min candles and predicted `y_timestamp = last_candle + 5min`, but 15-min Kalshi markets settle at the 15-min BRTI close. Added `candle_freq: str = "5min"` parameter (default preserves existing behavior). Background loop and 1h track can pass correct freq when ready. Commit `d36b56a`.
 
 **Session 11 bootstrap floor: Gate 2 chicken-and-egg deadlock resolved**
 

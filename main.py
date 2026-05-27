@@ -195,10 +195,11 @@ CREATE TABLE IF NOT EXISTS gate_rejections (
 
 _GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("aged_out", "INTEGER DEFAULT 0"),
-    # shadow=1 means Gate 7 would have blocked this trade but didn't (shadow mode).
-    # The actual trade is in trades.db; this row is for win-rate observability only.
-    # Any training query against gate_rejections MUST filter WHERE shadow = 0
-    # to avoid duplicating trades that already appear in trades.db.
+    # shadow=1: Gate 7 would have blocked but didn't. Trade IS in trades.db.
+    # shadow=2: Edge-flip shadow. Original direction had no edge vs market price;
+    #           this row records whether the FLIPPED direction would have won.
+    #           No trade happened. Used to validate edge-correct direction logic.
+    # Any training query against gate_rejections MUST filter WHERE shadow = 0.
     ("shadow", "INTEGER DEFAULT 0"),
     # Gate 8 (Kalshi consensus): fresh second-fetch mid-price at block time for threshold analysis.
     ("kalshi_mid_at_block", "REAL DEFAULT NULL"),
@@ -616,6 +617,50 @@ class KronosV2:
                 self._db.commit()
             except sqlite3.Error as exc:
                 logger.error(f"SQLite gate_rejections insert failed for {ticker}: {exc}")
+
+            # Shadow: if Kelly=0 because original direction has no edge vs market price,
+            # check whether the FLIPPED direction would have positive edge. Log as
+            # shadow=2 (gate 9) so we can track win-rate before going live.
+            if result.failed_gate == 2 and result.failed_reason and "Kelly size rounds to 0" in result.failed_reason:
+                flipped_dir = 1 - signal.direction
+                flip_price_cents = best_ask_cents if flipped_dir == 1 else (100 - best_bid_cents)
+                flip_win_prob = signal.calibrated_prob if flipped_dir == 1 else (1.0 - signal.calibrated_prob)
+                flip_edge = flip_win_prob - flip_price_cents / 100.0
+                if flip_edge > 0 and flip_price_cents >= 20:
+                    orig_label = "YES→UP" if signal.direction == 1 else "NO→DOWN"
+                    flip_label = "YES→UP" if flipped_dir == 1 else "NO→DOWN"
+                    shadow_reason = (
+                        f"Edge-flip shadow: {orig_label} no edge "
+                        f"(prob={signal.calibrated_prob:.2f} vs {fill_price_cents}¢); "
+                        f"{flip_label} edge={flip_edge:.3f} at {flip_price_cents}¢"
+                    )
+                    try:
+                        self._db.execute(
+                            """INSERT OR IGNORE INTO gate_rejections
+                               (rejection_id, timestamp, ticker, timeframe, direction,
+                                failed_gate, failed_reason, signal_prob, deepseek_regime,
+                                kalshi_mid_cents, features, shadow)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                str(uuid.uuid4()),
+                                time.time(),
+                                ticker,
+                                timeframe,
+                                flipped_dir,
+                                9,
+                                shadow_reason,
+                                signal.kronos_calibrated,
+                                signal.deepseek_regime,
+                                round(mid_cents),
+                                json.dumps(signal.regime_features or {}),
+                                2,
+                            ),
+                        )
+                        self._db.commit()
+                        logger.debug(f"Edge-flip shadow {ticker}: {flip_label} edge={flip_edge:.3f} at {flip_price_cents}¢")
+                    except sqlite3.Error as exc:
+                        logger.error(f"Edge-flip shadow insert failed for {ticker}: {exc}")
+
             return
 
         # Gate 7 shadow — log when CVD opposes direction but let trade proceed.
