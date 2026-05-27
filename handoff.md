@@ -10,6 +10,61 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
+**As of 2026-05-27 session 14: k15_calibrated_prob + candle_progress logging added. Deribit _MIN_DAYS_TO_EXPIRY lowered 3→1. Two pre-existing test bugs fixed. 368 tests pass.**
+
+**Session 14: k15 vs k5 timing analysis instrumentation**
+
+Added two new columns to `gate_rejections` and one to `trades` to enable a proper k5/k15 timing comparison in the future.
+
+**Why:** Current k15 data (109 resolved rows) shows k15 outperforming k5 overall (54.1% vs 40.4% directional accuracy) and strongly in the divergence case (k5YES/k15NO → k15 right 67.5%). But the data doesn't yet support the k5/k15 timing design (k5 at t=0, k15 at t+5) because:
+- Only 5 rows at t=0 (the entire design premise has 5 data points)
+- 89% of data is high_uncertainty + ranging; zero trending_up rows
+- All rows are from gate_rejections (Kelly→0 blocked trades) — a different population than what would fire under k15-primary
+- `k15_calibrated_prob` cannot be reconstructed post-hoc (calibrator state changes every 25 resolutions)
+
+**New columns:**
+
+| Column | Table(s) | Purpose |
+|--------|----------|---------|
+| `k15_calibrated_prob` | `gate_rejections`, `trades` | calibrator.transform(kronos_raw_15min) at signal time. The only moment this can be captured. Enables full k15-primary counterfactual: direction, edge, kelly. |
+| `candle_progress` | `gate_rejections` | Denormalized from features JSON for direct timing-bucket queries without JSON parsing. |
+
+**Key query for future analysis:**
+```sql
+SELECT
+  CASE WHEN candle_progress < 0.15 THEN 't=0'
+       WHEN candle_progress < 0.55 THEN 't+5'
+       ELSE 't+10' END as timing,
+  CASE WHEN signal_prob >= 0.5 AND k15_calibrated_prob >= 0.5 THEN 'agree-YES'
+       WHEN signal_prob < 0.5  AND k15_calibrated_prob < 0.5  THEN 'agree-NO'
+       WHEN signal_prob >= 0.5 AND k15_calibrated_prob < 0.5  THEN 'k5YES-k15NO'
+       ELSE 'k5NO-k15YES' END as signal,
+  COUNT(*) as n,
+  ROUND(100.0*AVG(outcome),1) as win_pct
+FROM gate_rejections
+WHERE k15_calibrated_prob IS NOT NULL AND outcome IS NOT NULL AND aged_out=0
+GROUP BY timing, signal ORDER BY timing, n DESC;
+```
+
+**Also: Deribit _MIN_DAYS_TO_EXPIRY lowered 3→1** — 3 days was filtering out valid weekly options near the roll, causing unnecessary `deribit_stale=1` rows during those periods. 1 day only skips same-day expiry (where theta spikes are actually problematic).
+
+**Pre-existing test bugs fixed (both from session 13):**
+- `test_does_not_rerun_mc_on_same_candle`: expected 1 MC call per candle, should be 2 (k5 + k15)
+- `test_fill_price_from_second_fetch`: `capture_record` mock missing `**kwargs` for `kronos_raw_15min`
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `main.py` | `_GATE_REJECTIONS_COLUMN_MIGRATIONS`: added `k15_calibrated_prob`, `candle_progress`; `_TRADES_COLUMN_MIGRATIONS`: added `k15_calibrated_prob`; `_process_market`: compute `_k15_cal = calibrator.transform(k15_raw)` and `_candle_prog` before all 3 gate_rejections INSERTs; `_record_trade_sqlite`: new `k15_calibrated_prob` param + column |
+| `btc_kalshi_system/data/deribit_options_feed.py` | `_MIN_DAYS_TO_EXPIRY` 3→1 |
+| `tests/execution/test_gate_rejections.py` | `_GATE_REJECTIONS_DDL` updated to include all migration columns |
+| `tests/test_main_bg_kronos.py` | MC call count 1→2; `capture_record` gains `**kwargs` |
+
+**Commit:** `e0be718`
+
+---
+
 **As of 2026-05-26 session 12 (post-deploy): Edge-flip shadow mode live. Gate 2a price floor added. KronosEngine candle_freq param added. 368 tests pass.**
 
 **Session 12: Edge-flip direction shadow mode (Gate 9)**
