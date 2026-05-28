@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS gate_rejections (
     kronos_raw          REAL DEFAULT NULL,
     would_be_fill_cents INTEGER DEFAULT NULL,
     k15_calibrated_prob REAL DEFAULT NULL,
-    candle_progress     REAL DEFAULT NULL
+    candle_progress     REAL DEFAULT NULL,
+    k15_post_open       INTEGER DEFAULT NULL
 )
 """
 

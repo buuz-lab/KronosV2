@@ -131,6 +131,9 @@ _TRADES_COLUMN_MIGRATIONS = [
     # k15 calibrated probability — calibrator.transform(kronos_raw_15min) at trade time.
     # Enables k15-primary vs k5-primary counterfactual on actual trades.
     ("k15_calibrated_prob",      "REAL DEFAULT NULL"),
+    # 1 if cached k15 was computed from a candle AFTER this market opened, 0 if pre-open.
+    # More precise than candle_progress for separating "k15 had current-market data" from "stale".
+    ("k15_post_open",            "INTEGER DEFAULT NULL"),
 ]
 
 _TRADE_SNAPSHOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
@@ -226,6 +229,9 @@ _GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("k15_calibrated_prob", "REAL DEFAULT NULL"),
     # Denormalized from features JSON for easy timing-bucket queries (t=0 / t+5 / t+10).
     ("candle_progress",     "REAL DEFAULT NULL"),
+    # 1 if cached k15 was computed from a candle AFTER this market opened, 0 if pre-open.
+    # More precise than candle_progress for separating "k15 had current-market data" from "stale".
+    ("k15_post_open",       "INTEGER DEFAULT NULL"),
 ]
 
 
@@ -386,17 +392,25 @@ class KronosV2:
                         last_candle_ts = current_ts
                         strike = await asyncio.to_thread(self._get_15min_reference_price)
                         try:
-                            prob = await asyncio.to_thread(
-                                self._kronos.run_monte_carlo, self._store, 100, strike
-                            )
-                            prob_15min: float | None = None
-                            try:
-                                prob_15min = await asyncio.to_thread(
+                            # Run k5 and k15 MC in parallel — halves dead time (~46s → ~23s).
+                            k5_result, k15_result = await asyncio.gather(
+                                asyncio.to_thread(
+                                    self._kronos.run_monte_carlo, self._store, 100, strike
+                                ),
+                                asyncio.to_thread(
                                     self._kronos.run_monte_carlo, self._store, 100, strike,
                                     candle_freq="15min",
-                                )
-                            except Exception as exc15:
-                                logger.warning(f"KronosBG: 15min MC failed — {exc15}")
+                                ),
+                                return_exceptions=True,
+                            )
+                            if isinstance(k5_result, Exception):
+                                raise k5_result
+                            prob = k5_result
+                            if isinstance(k15_result, Exception):
+                                logger.warning(f"KronosBG: 15min MC failed — {k15_result}")
+                                prob_15min: float | None = None
+                            else:
+                                prob_15min = k15_result
                             # Always assign a new dict — never mutate in place (GIL safety)
                             self._cached_kronos = {
                                 "prob": prob,
@@ -561,6 +575,18 @@ class KronosV2:
                 f"Kronos cache too stale ({_cache_age:.0f}s) — skipping cycle for {ticker}"
             )
             return
+
+        # Determine if k15 cache was computed from a candle AFTER this market opened.
+        # More precise than candle_progress: 1 = k15 has current-market data, 0 = pre-open.
+        try:
+            _close_str = market.get("close_time", "")
+            _close_dt = datetime.fromisoformat(_close_str.replace("Z", "+00:00"))
+            _market_open_unix = _close_dt.timestamp() - 900.0
+            _k15_post_open: int | None = (
+                1 if cached["candle_ts"].timestamp() >= _market_open_unix else 0
+            )
+        except Exception:
+            _k15_post_open = None
         logger.debug(
             f"KronosBG strike delta: ${abs(cached['strike'] - strike):.2f} "
             f"(cached={cached['strike']:.2f} market={strike:.2f})"
@@ -636,8 +662,9 @@ class KronosV2:
                        (rejection_id, timestamp, ticker, timeframe, direction,
                         failed_gate, failed_reason, signal_prob, deepseek_regime,
                         kalshi_mid_cents, features, kalshi_mid_at_block, would_be_fill_cents,
-                        kronos_raw_15min, kronos_raw, k15_calibrated_prob, candle_progress)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        kronos_raw_15min, kronos_raw, k15_calibrated_prob, candle_progress,
+                        k15_post_open)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         str(uuid.uuid4()),
                         time.time(),
@@ -656,6 +683,7 @@ class KronosV2:
                         cached.get("prob"),
                         _k15_cal,
                         _candle_prog,
+                        _k15_post_open,
                     ),
                 )
                 self._db.commit()
@@ -685,8 +713,8 @@ class KronosV2:
                                 failed_gate, failed_reason, signal_prob, deepseek_regime,
                                 kalshi_mid_cents, features, shadow, flip_price_cents,
                                 would_be_fill_cents, kronos_raw_15min, kronos_raw,
-                                k15_calibrated_prob, candle_progress)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                k15_calibrated_prob, candle_progress, k15_post_open)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 str(uuid.uuid4()),
                                 time.time(),
@@ -706,6 +734,7 @@ class KronosV2:
                                 cached.get("prob"),
                                 _k15_cal,
                                 _candle_prog,
+                                _k15_post_open,
                             ),
                         )
                         self._db.commit()
@@ -810,7 +839,8 @@ class KronosV2:
         _trade_k15_cal = self._calibrator.transform(_trade_k15_raw) if _trade_k15_raw is not None else None
         self._record_trade_sqlite(trade_id, signal, result2, ticker, fill_price_cents,
                                    kronos_raw_15min=_trade_k15_raw,
-                                   k15_calibrated_prob=_trade_k15_cal)
+                                   k15_calibrated_prob=_trade_k15_cal,
+                                   k15_post_open=_k15_post_open)
 
         # Gate 7 shadow insert — deferred to here so would_be_fill_cents = real fill price.
         if _g7_reason:
@@ -824,8 +854,9 @@ class KronosV2:
                        (rejection_id, timestamp, ticker, timeframe, direction,
                         failed_gate, failed_reason, signal_prob, deepseek_regime,
                         kalshi_mid_cents, features, shadow, would_be_fill_cents,
-                        kronos_raw_15min, kronos_raw, k15_calibrated_prob, candle_progress)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
+                        kronos_raw_15min, kronos_raw, k15_calibrated_prob, candle_progress,
+                        k15_post_open)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)""",
                     (
                         str(uuid.uuid4()), time.time(), ticker, timeframe,
                         signal.direction, 7, _g7_reason, signal.kronos_calibrated,
@@ -836,6 +867,7 @@ class KronosV2:
                         cached.get("prob"),
                         _g7_k15_cal,
                         _g7_candle_prog,
+                        _k15_post_open,
                     ),
                 )
                 self._db.commit()
@@ -1131,6 +1163,7 @@ class KronosV2:
         fill_price_cents: int,
         kronos_raw_15min: float | None = None,
         k15_calibrated_prob: float | None = None,
+        k15_post_open: int | None = None,
     ) -> None:
         import math
         # Pull the six regime features off the signal. These are the exact values
@@ -1160,14 +1193,14 @@ class KronosV2:
                     large_print_direction,
                     atm_iv, iv_rv_spread, pcr_oi, term_structure_slope,
                     skew_25d, kalshi_spread_normalized, deribit_stale, okx_stale,
-                    btc_24h_return, kronos_raw_15min, k15_calibrated_prob
+                    btc_24h_return, kronos_raw_15min, k15_calibrated_prob, k15_post_open
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?,
                     ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?
+                    ?, ?, ?, ?
                 )
                 """,
                 (
@@ -1218,6 +1251,7 @@ class KronosV2:
                     feats.get("btc_24h_return"),
                     kronos_raw_15min,
                     k15_calibrated_prob,
+                    k15_post_open,
                 ),
             )
             self._db.commit()
