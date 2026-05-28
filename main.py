@@ -392,25 +392,19 @@ class KronosV2:
                         last_candle_ts = current_ts
                         strike = await asyncio.to_thread(self._get_15min_reference_price)
                         try:
-                            # Run k5 and k15 MC in parallel — halves dead time (~46s → ~23s).
-                            k5_result, k15_result = await asyncio.gather(
-                                asyncio.to_thread(
-                                    self._kronos.run_monte_carlo, self._store, 100, strike
-                                ),
-                                asyncio.to_thread(
+                            # k5 then k15 sequentially — same model object isn't thread-safe
+                            # for concurrent forward passes; sequential is ~46s but reliable.
+                            prob = await asyncio.to_thread(
+                                self._kronos.run_monte_carlo, self._store, 100, strike
+                            )
+                            try:
+                                prob_15min: float | None = await asyncio.to_thread(
                                     self._kronos.run_monte_carlo, self._store, 100, strike,
                                     candle_freq="15min",
-                                ),
-                                return_exceptions=True,
-                            )
-                            if isinstance(k5_result, Exception):
-                                raise k5_result
-                            prob = k5_result
-                            if isinstance(k15_result, Exception):
-                                logger.warning(f"KronosBG: 15min MC failed — {k15_result}")
-                                prob_15min: float | None = None
-                            else:
-                                prob_15min = k15_result
+                                )
+                            except Exception as exc:
+                                logger.warning(f"KronosBG: 15min MC failed — {exc}")
+                                prob_15min = None
                             # Always assign a new dict — never mutate in place (GIL safety)
                             self._cached_kronos = {
                                 "prob": prob,
