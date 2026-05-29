@@ -171,8 +171,8 @@ while true; do
   echo ""
   echo -e "${BOLD}${CYAN}▶ P&L${RESET}"
 
-  # timestamps stored as UTC ISO8601; PDT = UTC-7
-  # strftime('%Y-%m-%d', substr(timestamp,1,19), '-7 hours') converts to PDT date
+  # timestamps stored as UTC ISO8601; PST = UTC-8
+  # strftime('%Y-%m-%d', substr(timestamp,1,19), '-8 hours') converts to PST date
   today_stats=$(sqlite3 "$DB" "
     SELECT
       COUNT(*),
@@ -186,8 +186,8 @@ while true; do
              ELSE 0 END), 2)
     FROM trades
     WHERE outcome IS NOT NULL
-      AND strftime('%Y-%m-%d', substr(timestamp,1,19), '-7 hours')
-        = strftime('%Y-%m-%d', 'now', '-7 hours');
+      AND strftime('%Y-%m-%d', substr(timestamp,1,19), '-8 hours')
+        = strftime('%Y-%m-%d', 'now', '-8 hours');
   " 2>/dev/null)
   t_total=$(echo "$today_stats" | cut -d'|' -f1)
   t_wins=$(echo "$today_stats"  | cut -d'|' -f2)
@@ -237,7 +237,7 @@ while true; do
   wr_c=$(_color_wr "$wr_num" "$wr")
   pnl_c=$(_color_pnl "$pnl_num" "$pnl")
 
-  echo -e "  ${BOLD}Today (PDT):${RESET}  Trades: ${WHITE}${t_total}${RESET}  Wins: ${GREEN}${t_wins}${RESET}  Losses: ${RED}${t_losses}${RESET}  WR: ${t_wr_c}  Net: ${t_pnl_c}"
+  echo -e "  ${BOLD}Today (PST):${RESET}  Trades: ${WHITE}${t_total}${RESET}  Wins: ${GREEN}${t_wins}${RESET}  Losses: ${RED}${t_losses}${RESET}  WR: ${t_wr_c}  Net: ${t_pnl_c}"
   echo -e "  ${DIM}All-time:${RESET}     Trades: ${WHITE}${total}${RESET}  Wins: ${GREEN}${wins}${RESET}  Losses: ${RED}${losses}${RESET}  WR: ${wr_c}  Net: ${pnl_c}"
 
   # ── Regime ────────────────────────────────────────────────────────
