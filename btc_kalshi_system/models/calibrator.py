@@ -5,7 +5,7 @@ import numpy as np
 from loguru import logger
 from sklearn.linear_model import LogisticRegression
 
-_MIN_SAMPLES = 300
+_MIN_SAMPLES = 100
 
 
 class Calibrator:

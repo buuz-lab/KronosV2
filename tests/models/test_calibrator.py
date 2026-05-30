@@ -44,9 +44,9 @@ def test_calibrated_output_differs_from_raw_after_fit():
 
 # ── pass-through when n < 300 ──────────────────────────────────────────────────
 
-def test_transform_is_passthrough_when_fewer_than_300_samples():
+def test_transform_is_passthrough_when_fewer_than_100_samples():
     cal = Calibrator()
-    raw, outcomes = _synthetic_data(n=299)
+    raw, outcomes = _synthetic_data(n=99)
     cal.fit(raw, outcomes)
     for p in [0.1, 0.5, 0.9]:
         assert cal.transform(p) == pytest.approx(p)
@@ -124,15 +124,15 @@ def test_fit_uses_y_up_labels():
     assert cal_correct.transform(0.7) != cal_inverted.transform(0.7)
 
 
-def test_min_samples_is_300():
-    """Passthrough should be True for n=299, False for n=300."""
+def test_min_samples_is_100():
+    """Passthrough should be True for n=99, False for n=100."""
     cal_under = Calibrator()
-    raw, outcomes = _synthetic_data(n=299)
+    raw, outcomes = _synthetic_data(n=99)
     cal_under.fit(raw, outcomes)
     assert cal_under._passthrough is True
 
     cal_at = Calibrator()
-    raw, outcomes = _synthetic_data(n=300)
+    raw, outcomes = _synthetic_data(n=100)
     cal_at.fit(raw, outcomes)
     assert cal_at._passthrough is False
 
@@ -198,7 +198,7 @@ def test_inverted_signal_calibrated_below_half():
 def test_passthrough_still_works_below_min_samples_logistic():
     """Passthrough is preserved below _MIN_SAMPLES with the logistic calibrator."""
     cal = Calibrator()
-    raw, outcomes = _synthetic_data(n=150)
+    raw, outcomes = _synthetic_data(n=80)
     cal.fit(raw, outcomes)
     assert cal._passthrough is True
     for p in [0.1, 0.5, 0.9]:
