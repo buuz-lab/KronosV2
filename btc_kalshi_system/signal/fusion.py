@@ -138,7 +138,7 @@ class SignalFusionEngine:
         # 5-min close (misaligned horizon), so using it produces a near-flat calibration.
         # Fall back to k5 on the rare candle where k15 hasn't computed yet.
         _cal_input = kronos_raw_15min if kronos_raw_15min is not None else kronos_raw
-        kronos_cal = self._calibrator.transform(_cal_input)
+        kronos_cal = self._calibrator.transform(_cal_input, regime=deepseek_regime)
         kronos_direction = 1 if kronos_cal >= 0.5 else 0
 
         # Compute features ONCE per signal so the values we feed the regime model

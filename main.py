@@ -663,7 +663,7 @@ class KronosV2:
             try:
                 would_be_fill = best_ask_cents if signal.direction == 1 else (100 - best_bid_cents)
                 _k15_raw = cached.get("prob_15min")
-                _k15_cal = self._calibrator.transform(_k15_raw) if _k15_raw is not None else None
+                _k15_cal = self._calibrator.transform(_k15_raw, regime=signal.deepseek_regime) if _k15_raw is not None else None
                 _candle_prog = (signal.regime_features or {}).get("candle_progress")
                 self._db.execute(
                     """INSERT OR IGNORE INTO gate_rejections
@@ -792,7 +792,7 @@ class KronosV2:
 
         # k. Log to SQLite
         _trade_k15_raw = cached.get("prob_15min")
-        _trade_k15_cal = self._calibrator.transform(_trade_k15_raw) if _trade_k15_raw is not None else None
+        _trade_k15_cal = self._calibrator.transform(_trade_k15_raw, regime=signal.deepseek_regime) if _trade_k15_raw is not None else None
         self._record_trade_sqlite(trade_id, signal, result2, ticker, fill_price_cents,
                                    kronos_raw_15min=_trade_k15_raw,
                                    k15_calibrated_prob=_trade_k15_cal,
@@ -802,7 +802,7 @@ class KronosV2:
         if _g7_reason:
             try:
                 _g7_k15_raw = cached.get("prob_15min")
-                _g7_k15_cal = self._calibrator.transform(_g7_k15_raw) if _g7_k15_raw is not None else None
+                _g7_k15_cal = self._calibrator.transform(_g7_k15_raw, regime=signal.deepseek_regime) if _g7_k15_raw is not None else None
                 _g7_candle_prog = (signal.regime_features or {}).get("candle_progress")
                 self._db.execute(
                     # shadow=1: trade proceeds; row is observability-only, not training data.
@@ -1326,18 +1326,19 @@ class KronosV2:
         try:
             self._redis.set("calibration_drift:pending_refits", 0)
             rows = self._db.execute(
-                """SELECT kronos_raw_15min, direction, outcome FROM (
-                       SELECT kronos_raw_15min, direction, outcome, timestamp FROM trades
+                """SELECT kronos_raw_15min, direction, outcome, deepseek_regime FROM (
+                       SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM trades
                        WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw_15min IS NOT NULL
                        UNION ALL
-                       SELECT kronos_raw_15min, direction, outcome, timestamp FROM gate_rejections
+                       SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM gate_rejections
                        WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw_15min IS NOT NULL
                    ) ORDER BY timestamp DESC LIMIT 300"""
             ).fetchall()
+            refit_regimes: np.ndarray | None = None
             if not rows:
                 # No k15 data yet — fall back to k5 to avoid a cold start
                 rows = self._db.execute(
-                    """SELECT kronos_raw, direction, outcome FROM (
+                    """SELECT kronos_raw, direction, outcome, NULL FROM (
                            SELECT kronos_raw, direction, outcome, timestamp FROM trades
                            WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw IS NOT NULL
                            UNION ALL
@@ -1348,6 +1349,8 @@ class KronosV2:
                 if not rows:
                     return
                 logger.info("Calibrator refit: no k15 data yet — using k5 fallback")
+            else:
+                refit_regimes = np.array([r[3] for r in rows], dtype=object)
             raw_probs = np.array([r[0] for r in rows], dtype=float)
             directions = np.array([r[1] for r in rows], dtype=float)
             outcomes_arr = np.array([r[2] for r in rows], dtype=float)
@@ -1355,7 +1358,7 @@ class KronosV2:
             #   direction=1, outcome=1 → YES happened → y=1
             #   direction=0, outcome=1 → NO happened  → y=0
             y_yes = np.where(directions == 1, outcomes_arr, 1.0 - outcomes_arr)
-            self._calibrator.fit(raw_probs, y_yes)
+            self._calibrator.fit(raw_probs, y_yes, regimes=refit_regimes)
             os.makedirs("models", exist_ok=True)
             self._calibrator.save(config.CALIBRATOR_MODEL_PATH)
             self._drift_monitor.reset_baseline()

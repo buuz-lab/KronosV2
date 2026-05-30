@@ -215,3 +215,81 @@ def test_passthrough_still_works_below_min_samples_logistic():
     assert cal._passthrough is True
     for p in [0.1, 0.5, 0.9]:
         assert cal.transform(p) == pytest.approx(p)
+
+
+# ── regime-aware calibrator ────────────────────────────────────────────────────
+
+def _regime_data(n: int = 600, seed: int = 42):
+    """Regime-tagged synthetic data: trending_up → y_up correlated; ranging → noisy."""
+    rng = np.random.default_rng(seed)
+    half = n // 2
+    raw_trend = rng.uniform(0.3, 0.9, half)
+    raw_range = rng.uniform(0.3, 0.9, half)
+    raw = np.concatenate([raw_trend, raw_range])
+    y_trend = (rng.uniform(0, 1, half) < raw_trend).astype(float)
+    y_range = (rng.uniform(0, 1, half) < 0.5).astype(float)
+    outcomes = np.concatenate([y_trend, y_range])
+    regimes = np.array(["trending_up"] * half + ["ranging"] * half, dtype=object)
+    return raw, outcomes, regimes
+
+
+def test_regime_aware_flag_set_when_regimes_provided():
+    raw, outcomes, regimes = _regime_data()
+    cal = Calibrator()
+    # Invert to guarantee deploy
+    rng = np.random.default_rng(99)
+    raw2 = np.array([0.1] * 300 + [0.9] * 300)
+    outcomes2 = np.array([1.0] * 300 + [0.0] * 300)
+    regimes2 = np.array(["trending_up"] * 300 + ["trending_down"] * 300, dtype=object)
+    cal.fit(raw2, outcomes2, regimes=regimes2)
+    assert cal._regime_aware is True
+
+
+def test_regime_aware_false_without_regimes():
+    cal = Calibrator()
+    raw = np.array([0.1] * 300 + [0.9] * 300)
+    outcomes = np.array([1.0] * 300 + [0.0] * 300)
+    cal.fit(raw, outcomes)
+    assert cal._regime_aware is False
+
+
+def test_transform_with_regime_differs_from_without():
+    """transform(p, regime=X) should differ from transform(p) for regime-aware model."""
+    cal = Calibrator()
+    raw = np.array([0.1] * 300 + [0.9] * 300)
+    outcomes = np.array([1.0] * 300 + [0.0] * 300)
+    regimes = np.array(["trending_up"] * 300 + ["trending_down"] * 300, dtype=object)
+    cal.fit(raw, outcomes, regimes=regimes)
+    assert not cal._passthrough
+    assert cal._regime_aware
+    result_up = cal.transform(0.7, regime="trending_up")
+    result_down = cal.transform(0.7, regime="trending_down")
+    assert result_up != pytest.approx(result_down)
+
+
+def test_transform_regime_unknown_uses_zero_encoding():
+    """Unknown regime string falls back to score=0.0 (same as ranging/high_uncertainty)."""
+    cal = Calibrator()
+    raw = np.array([0.1] * 300 + [0.9] * 300)
+    outcomes = np.array([1.0] * 300 + [0.0] * 300)
+    regimes = np.array(["trending_up"] * 300 + ["trending_down"] * 300, dtype=object)
+    cal.fit(raw, outcomes, regimes=regimes)
+    result_unknown = cal.transform(0.5, regime="garbage_regime")
+    result_ranging = cal.transform(0.5, regime="ranging")
+    assert result_unknown == pytest.approx(result_ranging, abs=1e-9)
+
+
+def test_regime_save_load_preserves_aware_flag():
+    import tempfile, os
+    cal = Calibrator()
+    raw = np.array([0.1] * 300 + [0.9] * 300)
+    outcomes = np.array([1.0] * 300 + [0.0] * 300)
+    regimes = np.array(["trending_up"] * 300 + ["trending_down"] * 300, dtype=object)
+    cal.fit(raw, outcomes, regimes=regimes)
+    expected = cal.transform(0.7, regime="trending_up")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "regime_cal.joblib")
+        cal.save(path)
+        cal2 = Calibrator.load(path)
+        assert cal2._regime_aware is True
+        assert cal2.transform(0.7, regime="trending_up") == pytest.approx(expected, abs=1e-9)

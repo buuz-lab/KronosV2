@@ -59,13 +59,13 @@ def main() -> None:
         sys.exit(f"Database not found: {args.db}")
 
     _UNION_QUERY = """
-        SELECT kronos_raw_15min, direction, outcome, timestamp FROM (
-            SELECT kronos_raw_15min, direction, outcome, timestamp FROM trades
+        SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM (
+            SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM trades
             WHERE outcome IS NOT NULL
               AND features_stale = 0
               AND kronos_raw_15min IS NOT NULL
             UNION ALL
-            SELECT kronos_raw_15min, direction, outcome, timestamp FROM gate_rejections
+            SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM gate_rejections
             WHERE outcome IS NOT NULL
               AND kronos_raw_15min IS NOT NULL
               AND shadow = 0
@@ -104,6 +104,7 @@ def main() -> None:
     raw_probs = np.array([r[0] for r in rows], dtype=float)
     directions = np.array([r[1] for r in rows], dtype=float)
     outcomes = np.array([r[2] for r in rows], dtype=float)
+    regimes = np.array([r[4] for r in rows], dtype=object)
     y_up = (directions == outcomes).astype(float)
 
     # Load existing calibrator for pre-retrain Brier comparison
@@ -120,7 +121,7 @@ def main() -> None:
         print(f"No existing calibrator at {args.out} — fitting fresh")
 
     cal = Calibrator()
-    cal.fit(raw_probs, y_up)
+    cal.fit(raw_probs, y_up, regimes=regimes)
     post_brier = cal.brier_score(raw_probs, y_up)
 
     print(f"Post-retrain Brier: {post_brier:.4f}")

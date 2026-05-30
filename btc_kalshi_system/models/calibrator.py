@@ -7,6 +7,17 @@ from sklearn.linear_model import LogisticRegression
 
 _MIN_SAMPLES = 100
 
+_REGIME_ENCODING: dict[str, float] = {
+    "trending_up": 1.0,
+    "trending_down": -1.0,
+    "ranging": 0.0,
+    "high_uncertainty": 0.0,
+}
+
+
+def _encode_regime(regime: str | None) -> float:
+    return _REGIME_ENCODING.get(regime or "", 0.0)
+
 
 class Calibrator:
     """
@@ -23,16 +34,28 @@ class Calibrator:
         self._passthrough: bool = True
         self._n_samples: int = 0
         self._prev_brier: float | None = None
+        self._regime_aware: bool = False
 
     @property
     def n_samples(self) -> int:
         return self._n_samples
 
-    def fit(self, raw_probs: np.ndarray, outcomes: np.ndarray) -> "Calibrator":
+    def fit(
+        self,
+        raw_probs: np.ndarray,
+        outcomes: np.ndarray,
+        regimes: np.ndarray | None = None,
+    ) -> "Calibrator":
         raw_probs = np.asarray(raw_probs, dtype=float)
         outcomes = np.asarray(outcomes, dtype=float)
         n = len(raw_probs)
         self._n_samples = n
+
+        use_regime = regimes is not None and len(regimes) == n
+        if use_regime:
+            regime_scores = np.array([_encode_regime(r) for r in regimes], dtype=float)
+        else:
+            regime_scores = None
 
         # Holdout split: newest 20% (min 20 rows) as unseen evaluation set.
         # Data is expected ordered newest-first (ORDER BY timestamp DESC).
@@ -46,11 +69,17 @@ class Calibrator:
         raw_train, y_train = raw_probs[n_holdout:], outcomes[n_holdout:]
         raw_holdout, y_holdout = raw_probs[:n_holdout], outcomes[:n_holdout]
 
-        X_train = np.column_stack([raw_train, raw_train ** 2])
+        if use_regime:
+            reg_train = regime_scores[n_holdout:]
+            reg_holdout = regime_scores[:n_holdout]
+            X_train = np.column_stack([raw_train, raw_train ** 2, reg_train])
+            X_holdout = np.column_stack([raw_holdout, raw_holdout ** 2, reg_holdout])
+        else:
+            X_train = np.column_stack([raw_train, raw_train ** 2])
+            X_holdout = np.column_stack([raw_holdout, raw_holdout ** 2])
+
         new_model = LogisticRegression(max_iter=1000)
         new_model.fit(X_train, y_train)
-
-        X_holdout = np.column_stack([raw_holdout, raw_holdout ** 2])
         holdout_preds = np.clip(new_model.predict_proba(X_holdout)[:, 1], 0.0, 1.0)
         holdout_brier = float(np.mean((holdout_preds - y_holdout) ** 2))
         passthrough_holdout_brier = float(np.mean((raw_holdout - y_holdout) ** 2))
@@ -64,6 +93,7 @@ class Calibrator:
             self._model = new_model
             self._passthrough = False
             self._prev_brier = holdout_brier
+            self._regime_aware = use_regime
         else:
             logger.warning(
                 f"Calibrator: holdout Brier {holdout_brier:.4f} vs passthrough "
@@ -78,10 +108,13 @@ class Calibrator:
 
         return self
 
-    def transform(self, raw_prob: float) -> float:
+    def transform(self, raw_prob: float, regime: str | None = None) -> float:
         if self._passthrough or self._model is None:
             return float(raw_prob)
-        X = np.array([[raw_prob, raw_prob ** 2]])
+        if self._regime_aware:
+            X = np.array([[raw_prob, raw_prob ** 2, _encode_regime(regime)]])
+        else:
+            X = np.array([[raw_prob, raw_prob ** 2]])
         return float(np.clip(self._model.predict_proba(X)[0, 1], 0.0, 1.0))
 
     def brier_score(self, raw_probs: np.ndarray, outcomes: np.ndarray) -> float:
@@ -97,6 +130,7 @@ class Calibrator:
             "passthrough": self._passthrough,
             "n_samples": self._n_samples,
             "prev_brier": self._prev_brier,
+            "regime_aware": self._regime_aware,
         }, path)
 
     @classmethod
@@ -109,4 +143,5 @@ class Calibrator:
         obj._passthrough = state["passthrough"]
         obj._n_samples = state.get("n_samples", 0)
         obj._prev_brier = state.get("prev_brier", None)
+        obj._regime_aware = state.get("regime_aware", False)
         return obj
