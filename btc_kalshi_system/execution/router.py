@@ -83,6 +83,13 @@ class KalshiClientRouter:
             logger.info("pykalshi recovered — switched back to PRIMARY")
         else:
             logger.warning("pykalshi recovery attempt failed — staying in current state")
+            # If both clients were failed, demote to FALLBACK so the raw HTTP
+            # client gets a chance to retry on the next cycle rather than staying
+            # permanently stuck until restart.
+            with self._lock:
+                if self._state is ClientState.BOTH_FAILED:
+                    self._state = ClientState.FALLBACK
+                    logger.info("BOTH_FAILED → FALLBACK: raw HTTP client will retry next cycle")
 
     def _handle_primary_failure(self, exc: Exception) -> None:
         with self._lock:

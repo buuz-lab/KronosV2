@@ -179,7 +179,9 @@ def make_trades_panel(db) -> Panel:
                printf('%.2f', kelly_dollars), kelly_contracts, outcome,
                CASE WHEN outcome=1 THEN ROUND(kelly_contracts*(100-fill_price_cents)/100.0,2)
                     WHEN outcome=0 THEN ROUND(-kelly_contracts*fill_price_cents/100.0,2)
-                    ELSE NULL END as pnl
+                    ELSE NULL END as pnl,
+               ROUND(kronos_raw_15min, 2),
+               ROUND(k15_calibrated_prob, 2)
         FROM trades
         WHERE {today_filter_trades()}
         ORDER BY timestamp DESC LIMIT 10
@@ -191,19 +193,23 @@ def make_trades_panel(db) -> Panel:
     t.add_column("Market",   min_width=8,  no_wrap=True)
     t.add_column("Dir",      min_width=8,  no_wrap=True)
     t.add_column("Fill",     min_width=4,  no_wrap=True)
+    t.add_column("k15raw",   min_width=6,  no_wrap=True)
+    t.add_column("k15cal",   min_width=6,  no_wrap=True)
     t.add_column("Kelly $",  min_width=7,  no_wrap=True)
     t.add_column("Size",     min_width=4,  no_wrap=True)
     t.add_column("P&L",      min_width=7,  no_wrap=True)
     t.add_column("Result",   min_width=5,  no_wrap=True)
 
     for row in rows:
-        pst_t, ticker, direction, fill, kelly, contracts, outcome, pnl = row
+        pst_t, ticker, direction, fill, kelly, contracts, outcome, pnl, k15raw, k15cal = row
         mkt = re.sub(r"KXBTC15M-\d{2}MAY\d{2}", "", ticker)
         t.add_row(
             pst_t or "—",
             mkt or "—",
             color_dir(direction),
             color_fill(fill),
+            color_prob(k15raw),
+            color_prob(k15cal),
             Text(f"${kelly}", style="yellow"),
             Text(f"{contracts}x", style="dim"),
             color_pnl(pnl) if pnl is not None else Text("—", style="dim"),
