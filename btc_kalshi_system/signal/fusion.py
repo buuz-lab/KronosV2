@@ -42,10 +42,9 @@ from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
 _KRONOS_WEIGHT = 0.6
 _REGIME_WEIGHT = 0.4
-_UNCERTAINTY_SHRINK = 0.5     # applied when DeepSeek signals high_uncertainty
-_RANGING_SHRINK = 0.7         # applied when DeepSeek signals ranging (noisy, not untradeable)
-_TRENDING_DOWN_SHRINK = 0.5   # applied when DeepSeek signals trending_down (k15 inverted signal empirically)
-_BOOTSTRAP_SHRINK = 0.8       # applied when RegimeModel is untrained (bootstrap phase)
+_UNCERTAINTY_SHRINK = 0.5   # applied when DeepSeek signals high_uncertainty
+_RANGING_SHRINK = 0.7       # applied when DeepSeek signals ranging (noisy, not untradeable)
+_BOOTSTRAP_SHRINK = 0.8     # applied when RegimeModel is untrained (bootstrap phase)
 
 
 @dataclass
@@ -173,8 +172,6 @@ class SignalFusionEngine:
                 combined = 0.5 + (combined - 0.5) * _UNCERTAINTY_SHRINK
             elif deepseek_regime == "ranging":
                 combined = 0.5 + (combined - 0.5) * _RANGING_SHRINK
-            elif deepseek_regime == "trending_down":
-                combined = 0.5 + (combined - 0.5) * _TRENDING_DOWN_SHRINK
 
         except NotTrainedError:
             # Regime model not yet trained — Kronos-only with a lighter bootstrap shrink.
