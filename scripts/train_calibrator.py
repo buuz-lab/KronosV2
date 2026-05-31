@@ -131,6 +131,18 @@ def main() -> None:
     if pre_brier is not None and post_brier > pre_brier:
         print(f"WARNING: new Brier {post_brier:.4f} > old Brier {pre_brier:.4f} — calibration degraded")
 
+    # Compression map: shows how aggressively the calibrator squashes strong k15 signals.
+    # Watch k15_raw=0.80 → k15_cal: if it rises above ~0.65, the calibrator is loosening
+    # (more data is teaching it to trust strong signals). If it stays < 0.60, compression
+    # is still severe and fusion + regime shrinks will produce near-zero edge.
+    checkpoints = [0.60, 0.70, 0.80, 0.90, 1.00]
+    print("\nCompression map (k15_raw → k15_cal, neutral regime):")
+    for raw in checkpoints:
+        cal_val = cal.transform(raw, regime="trending_up")
+        bar = "█" * int((cal_val - 0.50) * 200)
+        flag = "  ← loosening!" if cal_val > 0.65 and raw >= 0.80 else ""
+        print(f"  {raw:.2f} → {cal_val:.4f}  {bar}{flag}")
+
     if args.dry_run:
         print("\n--dry-run set — calibrator NOT saved.")
         return
