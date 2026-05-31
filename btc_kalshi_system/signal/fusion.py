@@ -7,7 +7,7 @@ Gate 2 (direction): Kronos ≠ regime       → log warning, and return None ONL
     config.REGIME_GATE2_ENFORCING=True. Skipped entirely if regime not trained.
 
 Combined probability formula (when both models available):
-    combined = 0.6 * kronos_calibrated + 0.4 * regime_prob
+    combined = 0.8 * kronos_calibrated + 0.2 * regime_prob
     if deepseek_regime == "high_uncertainty":
         combined = 0.5 + (combined - 0.5) * 0.5   # 50% shrink
     elif deepseek_regime == "ranging":
@@ -40,8 +40,12 @@ from btc_kalshi_system.models.deepseek_parser import DeepSeekContextParser
 from btc_kalshi_system.models.kronos_engine import KronosEngine
 from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
-_KRONOS_WEIGHT = 0.6
-_REGIME_WEIGHT = 0.4
+_KRONOS_WEIGHT = 0.8
+# Reduced from 0.4 → 0.2 (session 23): regime model v1 has circular label
+# (direction==outcome; kalshi_implied_prob is #1 feature at 19%). On bullish days,
+# model fires bearish and contaminates fusion. Restore to 0.4 after regime v2 retrains
+# with BTC-direction label. See handoff.md — Phase 1b.
+_REGIME_WEIGHT = 0.2
 _UNCERTAINTY_SHRINK = 0.5   # applied when DeepSeek signals high_uncertainty
 _RANGING_SHRINK = 0.7       # applied when DeepSeek signals ranging (noisy, not untradeable)
 _BOOTSTRAP_SHRINK = 0.8     # applied when RegimeModel is untrained (bootstrap phase)

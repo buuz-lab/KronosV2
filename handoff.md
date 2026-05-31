@@ -4,11 +4,44 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 22 complete. `candle_features` table live (logs regime features + `btc_direction` at every 15-min candle close, ~96 rows/day). `scripts/regime_confidence_tracker.py` deployed for Gate 2 shadow analysis. Next: calibrator 883-row retrain (check `python3 scripts/train_calibrator.py --dry-run`), then Gate 2 enforcement decision after ~50 shadow trades.
+**Current focus:** Session 23 complete. Gate 11 (overconfidence guard) live. Regime weight reduced 0.4→0.2. 403 tests pass (401 + 4 new Gate 11). Next: calibrator 883-row retrain (check `python3 scripts/train_calibrator.py --dry-run`), Gate 2 enforcement after ~50 shadow trades, regime v2 retrain after 7+ days of `candle_features`.
 
 ---
 
 ## Current Progress
+
+**As of 2026-05-30 session 23: Gate 11 (overconfidence guard) + regime weight 0.4→0.2. 403 tests pass (401 + 4 new).**
+
+**Session 23: Gate 11 + regime weight reduction**
+
+**Changes — session 23:**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/execution/pretrade_checklist.py` | **Gate 11** (new): blocks YES trades where `kronos_calibrated > 0.75` AND `trade_price_cents < 45`. Post-May-26 data shows 15% win rate on 13 trades in this zone. Placed after Gate 2a (price floor), before Kelly computation. Constants `_OVERCONFIDENCE_K_CAL_FLOOR=0.75` and `_OVERCONFIDENCE_MAX_FILL_CENTS=45` defined locally inside `run()`. Only applies to direction=1 (YES). |
+| `btc_kalshi_system/signal/fusion.py` | **Regime weight 0.4→0.2**: `_KRONOS_WEIGHT=0.8`, `_REGIME_WEIGHT=0.2`. Regime model v1 has circular label (`direction==outcome`; `kalshi_implied_prob` is #1 feature at 19%). On bullish days model fires bearish and contaminates fusion. Restore to 0.4 after regime v2 retrains with `btc_direction` label. Comment added to `_REGIME_WEIGHT`. |
+| `tests/execution/test_pretrade_checklist.py` | **4 new Gate 11 tests**: `test_gate11_fires_high_kcal_low_fill_yes`, `test_gate11_does_not_fire_high_fill`, `test_gate11_does_not_fire_low_kcal`, `test_gate11_does_not_fire_no_direction`. **3 existing tests updated**: `test_gate2_depth_capped_to_available` and 2 Gate 8 regression tests moved from 29¢ → 50¢ fills (Gate 11 now correctly blocks the 29¢ high-confidence scenario). |
+| `tests/signal/test_fusion.py` | **5 tests updated** for new weights: `test_combined_weighted_average`, `test_combined_varies_with_regime_weight` (docstring), `test_high_uncertainty_shrinks_combined_toward_half`, `test_trending_up_regime_no_shrinkage`, `test_gate2_shadow_mode_does_not_block`. All expected values updated from `0.6*X + 0.4*Y` → `0.8*X + 0.2*Y`. |
+
+**Gate 11 detail:**
+- Fires when: `direction == 1 AND kronos_calibrated > 0.75 AND trade_price_cents < 45`
+- Uses `signal.kronos_calibrated` (k15-calibrated). With passthrough calibrator = k15_raw; after calibrator activates = compressed value. Gate fires on whatever the current calibrated value is.
+- Does NOT apply to direction=0 (NO). NO at 35¢ = YES at 65¢ — market agreeing with Kronos, different dynamics.
+- Gate 8 doesn't catch this: at YES=35¢, opposing margin = 0.15 < Gate 8 threshold (0.25). Calibrator doesn't fix it either: k15≥0.8 shows 54% y_up rate in combined training data (gate rejections dilute inversion).
+
+**Regime weight detail (0.4→0.2):**
+- Gate 2 stays shadow mode (`REGIME_GATE2_ENFORCING=False`) — unchanged.
+- Gate 5 and Gate 3 thresholds unchanged — the weight reduction naturally helps clearance without further adjustment.
+- Example: k15_cal=0.75, regime_prob=0.18 (bearish, wrong). Old: combined=0.522, edge at 50¢=0.022 → Gate 5 blocks. New: combined=0.636, edge=0.136 → passes.
+- Restore to 0.4 after regime v2 retrains with `btc_direction = close > open` label. See Future Roadmap.
+
+**Next milestones:**
+0. **Calibrator 883-row retrain** (~1 day away). Run `python3 scripts/train_calibrator.py --dry-run` before allowing save. See memory `project-calibrator-883-retrain`.
+1. **Monitor Gate 11 rejections.** Query: `SELECT COUNT(*), AVG(trade_price_cents), AVG(k15_calibrated_prob) FROM gate_rejections WHERE failed_gate=11 AND outcome IS NOT NULL`. Confirm win rate validates the 15% historical figure.
+2. **Gate 2 enforcement decision.** Run `python3 scripts/regime_confidence_tracker.py` after ~50 shadow trades.
+3. **Regime v2 retrain** after 7+ days of `candle_features` (~672 rows). New label: `btc_direction = close > open`. Drop `kalshi_spread_normalized` (circular). Restore `_REGIME_WEIGHT=0.4` after retrain.
+
+---
 
 **As of 2026-05-30 session 22: 15-min candle feature logger + regime confidence tracker. Infrastructure for regime label change. 401 tests pass (395 + 6 new).**
 

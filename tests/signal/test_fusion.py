@@ -176,15 +176,15 @@ def test_gate2_boundary_kronos_exactly_half_is_down():
 # ── Combined probability formula (trained regime model) ───────────────────────
 
 def test_combined_weighted_average():
-    """combined = 0.6 * kronos_cal + 0.4 * regime_prob"""
+    """combined = 0.8 * kronos_cal + 0.2 * regime_prob"""
     engine = make_engine(kronos_cal=0.70, regime_prob=0.80, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
-    expected = 0.6 * 0.70 + 0.4 * 0.80
+    expected = 0.8 * 0.70 + 0.2 * 0.80
     assert result.calibrated_prob == pytest.approx(expected)
 
 
 def test_combined_varies_with_regime_weight():
-    """Regime contributes 40% to the final signal."""
+    """Regime contributes 20% to the final signal."""
     engine_high = make_engine(kronos_cal=0.65, regime_prob=0.90, regime_direction=1)
     engine_low = make_engine(kronos_cal=0.65, regime_prob=0.55, regime_direction=1)
     assert engine_high.get_signal("5min", 76000.0).calibrated_prob > \
@@ -200,8 +200,8 @@ def test_high_uncertainty_shrinks_combined_toward_half():
         deepseek_result=_ds_result(regime="high_uncertainty"),
     )
     result = engine.get_signal("5min", 76000.0)
-    base = 0.6 * 0.70 + 0.4 * 0.80        # 0.74
-    expected = 0.5 + (base - 0.5) * 0.5   # 0.62
+    base = 0.8 * 0.70 + 0.2 * 0.80        # 0.72
+    expected = 0.5 + (base - 0.5) * 0.5   # 0.61
     assert result.calibrated_prob == pytest.approx(expected)
 
 
@@ -219,7 +219,7 @@ def test_high_uncertainty_does_not_suppress():
 def test_trending_up_regime_no_shrinkage():
     engine = make_engine(kronos_cal=0.70, regime_prob=0.80, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
-    expected = 0.6 * 0.70 + 0.4 * 0.80
+    expected = 0.8 * 0.70 + 0.2 * 0.80
     assert result.calibrated_prob == pytest.approx(expected)
 
 
@@ -381,7 +381,7 @@ def test_gate2_shadow_mode_does_not_block(monkeypatch):
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
     # Combined blend still computed with both inputs since Gate 2 didn't block
-    expected = 0.6 * 0.70 + 0.4 * 0.30
+    expected = 0.8 * 0.70 + 0.2 * 0.30
     assert result.calibrated_prob == pytest.approx(expected)
 
 

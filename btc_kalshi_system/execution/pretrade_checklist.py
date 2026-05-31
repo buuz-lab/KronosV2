@@ -71,6 +71,26 @@ class PreTradeChecklist:
         _MIN_TRADE_PRICE_CENTS = 20
         if trade_price_cents < _MIN_TRADE_PRICE_CENTS:
             return fail(2, f"Trade price {trade_price_cents}¢ below minimum {_MIN_TRADE_PRICE_CENTS}¢ (extreme/illiquid market)")
+
+        # Gate 11 — Overconfidence guard
+        # Block YES trades where Kronos is at high confidence (k_cal > 0.75) but the
+        # market prices strongly against us (YES fill < 45¢). In this zone, the market's
+        # disagreement is informative: post-May-26 data shows 15% win rate on 13 trades.
+        # The calibrator compresses k_raw=1.0 to ~0.56 but keeps direction YES, so this
+        # gate is still needed after calibrator activates.
+        # Only applies to YES direction — NO direction at low prices has different dynamics.
+        _OVERCONFIDENCE_K_CAL_FLOOR = 0.75
+        _OVERCONFIDENCE_MAX_FILL_CENTS = 45
+        if (signal.direction == 1
+                and signal.kronos_calibrated > _OVERCONFIDENCE_K_CAL_FLOOR
+                and trade_price_cents < _OVERCONFIDENCE_MAX_FILL_CENTS):
+            return fail(
+                11,
+                f"Overconfidence guard: k_cal={signal.kronos_calibrated:.2f} but "
+                f"YES fill {trade_price_cents}¢ < {_OVERCONFIDENCE_MAX_FILL_CENTS}¢ "
+                f"(market disagrees strongly; 15% historical win rate in this zone)",
+            )
+
         loss_streak = int(self._redis.get("trading:loss_streak") or 0)
         kelly_dollars = self._kelly.compute_size(
             prob=win_prob,

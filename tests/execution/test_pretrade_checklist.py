@@ -93,16 +93,17 @@ def test_gate2_depth_capped_to_available(checklist):
 
     Regression: previously hard-failed on depth, leaving edge on the table when
     the orderbook had fewer contracts than Kelly requested (e.g. 10 available, 27 wanted).
+    Uses 50¢ fill (above Gate 11's 45¢ floor) so Gate 11 does not fire.
     """
     signal = make_signal(direction=1, calibrated_prob=0.85)
     kw = base_kwargs(signal)
-    kw["best_ask_cents"] = 37
-    kw["best_bid_cents"] = 36
-    kw["available_contracts"] = 5   # Kelly will want far more than 5 at 85%/37¢
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 49
+    kw["available_contracts"] = 5   # Kelly will want far more than 5 at 85%/50¢
     r = checklist.run(**kw)
     assert r.passed
     assert r.kelly_contracts == 5
-    assert r.kelly_dollars == pytest.approx(5 * 0.37, rel=0.01)
+    assert r.kelly_dollars == pytest.approx(5 * 0.50, rel=0.01)
 
 
 def test_gate2_zero_depth_still_fails(checklist):
@@ -298,17 +299,18 @@ def test_gate8_kelly_multiplier_reduces_dollars(checklist):
 
 
 def test_high_confidence_k15_passes_when_kalshi_disagrees_moderately(checklist):
-    """k15=0.89 YES@29¢, Kalshi=0.29 → opposing=0.21 < threshold=0.25 → passes all gates.
+    """k15=0.89 YES@50¢, Kalshi=0.29 → opposing=0.21 < threshold=0.25 → passes Gate 8.
 
-    Regression: old Gate 8 threshold (0.08) and Gate 8b denominator (0.20) both blocked
-    this scenario even though k15=0.89 at 29¢ is a 60¢-edge call validated as WIN.
+    Regression: old Gate 8 threshold (0.08) and Gate 8b denominator (0.20) blocked
+    high-confidence YES calls with moderate Kalshi disagreement. Uses 50¢ fill to avoid
+    Gate 11 (which blocks YES fills < 45¢ at k_cal > 0.75 — different issue).
     """
     signal = make_signal(direction=1, calibrated_prob=0.89)
     kw = base_kwargs(signal)
-    kw["best_ask_cents"] = 29
-    kw["best_bid_cents"] = 28
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 49
     kw["fresh_kalshi_mid"] = 0.29
-    kw["available_contracts"] = 200  # pre-multiplier Kelly ~109 contracts at 29¢
+    kw["available_contracts"] = 200
     r = checklist.run(**kw)
     assert r.passed
     assert r.kelly_contracts >= 1
@@ -477,13 +479,14 @@ def test_gate8_medium_confidence_passes_when_kalshi_barely_aligned(checklist):
     assert r.failed_gate != 8
 
 
-def test_gate8_high_confidence_still_passes_at_29c_kalshi(checklist):
+def test_gate8_high_confidence_still_passes_moderate_kalshi_disagreement(checklist):
     """High k15 confidence (prob=0.89, distance=0.39 ≥ 0.30) → threshold=0.25.
-    kalshi_mid=0.29 → opposing=0.21 < 0.25 → passes. Regression: session-15 case."""
+    kalshi_mid=0.29 → opposing=0.21 < 0.25 → passes Gate 8. Uses 50¢ fill to avoid
+    Gate 11 (Gate 11 blocks YES < 45¢ at k_cal > 0.75; Gate 8 behavior is separate)."""
     signal = make_signal(direction=1, calibrated_prob=0.89)
     kw = base_kwargs(signal)
-    kw["best_ask_cents"] = 29
-    kw["best_bid_cents"] = 28
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 49
     kw["available_contracts"] = 200
     kw["fresh_kalshi_mid"] = 0.29
     r = checklist.run(**kw)
@@ -505,6 +508,63 @@ def test_gate10_removed_trending_up_no_now_passes(checklist):
     r = checklist.run(**base_kwargs(signal))
     assert r.passed
 
+
+# ── Gate 11: Overconfidence guard ────────────────────────────────────────────
+
+def test_gate11_fires_high_kcal_low_fill_yes(checklist):
+    """direction=YES, k_cal=0.85, fill=40¢ → Gate 11 blocks.
+    High Kronos confidence + market pricing YES below 45¢ = market strongly disagrees.
+    Post-May-26 data shows 15% win rate in this zone."""
+    signal = make_signal(direction=1, calibrated_prob=0.85)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 40
+    kw["best_bid_cents"] = 38
+    r = checklist.run(**kw)
+    assert not r.passed
+    assert r.failed_gate == 11
+
+
+def test_gate11_does_not_fire_high_fill(checklist):
+    """direction=YES, k_cal=0.85, fill=50¢ → Gate 11 must not fire (fill >= 45¢ threshold)."""
+    signal = make_signal(direction=1, calibrated_prob=0.85)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 48
+    r = checklist.run(**kw)
+    assert r.failed_gate != 11
+
+
+def test_gate11_does_not_fire_low_kcal(checklist):
+    """direction=YES, k_cal=0.60, fill=35¢ → Gate 11 must not fire (k_cal <= 0.75 floor)."""
+    signal = make_signal(direction=1, calibrated_prob=0.60)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 35
+    kw["best_bid_cents"] = 33
+    kw["available_contracts"] = 200
+    r = checklist.run(**kw)
+    assert r.failed_gate != 11
+
+
+def test_gate11_does_not_fire_no_direction(checklist):
+    """direction=NO, k_cal=0.85, NO fill=35¢ (= YES at 65¢). Gate 11 only guards YES direction."""
+    signal = TradingSignal(
+        direction=0,
+        calibrated_prob=0.35,
+        kronos_raw=0.85,
+        kronos_calibrated=0.85,
+        regime_prob=0.50,
+        regime_direction=0,
+        deepseek_regime="neutral",
+        timeframe="5min",
+        strike=95000.0,
+        timestamp=datetime.now(timezone.utc),
+        regime_features={},
+    )
+    kw = base_kwargs(signal)
+    kw["best_bid_cents"] = 65  # NO price = 100 - 65 = 35¢
+    kw["best_ask_cents"] = 67
+    r = checklist.run(**kw)
+    assert r.failed_gate != 11
 
 
 # ── High-uncertainty Kelly shrink ─────────────────────────────────────────────
