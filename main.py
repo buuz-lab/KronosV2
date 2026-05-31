@@ -26,7 +26,7 @@ from btc_kalshi_system.execution.router import KalshiClientRouter
 from btc_kalshi_system.models.calibrator import Calibrator
 from btc_kalshi_system.models.deepseek_parser import DeepSeekContextParser
 from btc_kalshi_system.models.kronos_engine import KronosEngine
-from btc_kalshi_system.models.regime_model import RegimeModel
+from btc_kalshi_system.models.regime_model import RegimeModel, _FEATURE_ORDER
 from btc_kalshi_system.portfolio.circuit_breaker import CircuitBreaker
 from btc_kalshi_system.portfolio.monitor import OpenPosition, PortfolioMonitor
 from btc_kalshi_system.signal.calibration_drift_monitor import CalibrationDriftMonitor
@@ -231,6 +231,22 @@ _GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
 ]
 
 
+_CREATE_CANDLE_FEATURES_TABLE = (
+    """CREATE TABLE IF NOT EXISTS candle_features (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    candle_ts     TEXT NOT NULL UNIQUE,
+    btc_direction INTEGER,
+    logged_at     TEXT NOT NULL,
+    features_stale  INTEGER DEFAULT 0,
+    deribit_stale   INTEGER DEFAULT 0,
+    """
+    + ",\n    ".join(f"{col}    REAL" for col in _FEATURE_ORDER)
+    + "\n)"
+)
+
+_CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = []
+
+
 class KronosV2:
     def __init__(self) -> None:
         self._store = FeatureStore()
@@ -329,6 +345,12 @@ class KronosV2:
                 self._db.execute(f"ALTER TABLE gate_rejections ADD COLUMN {col_name} {col_def}")
             except sqlite3.OperationalError:
                 pass
+        self._db.execute(_CREATE_CANDLE_FEATURES_TABLE)
+        for col_name, col_def in _CANDLE_FEATURES_COLUMN_MIGRATIONS:
+            try:
+                self._db.execute(f"ALTER TABLE candle_features ADD COLUMN {col_name} {col_def}")
+            except sqlite3.OperationalError:
+                pass
         self._db.commit()
 
         self._running = False
@@ -364,6 +386,7 @@ class KronosV2:
             self._regime_watchdog(),
             self._position_monitor.run(),
             self._kronos_background_loop(),
+            self._candle_logger_loop(),
         )
 
     async def _main_loop(self) -> None:
@@ -478,6 +501,47 @@ class KronosV2:
                     )
             except Exception as exc:
                 logger.error(f"WATCHDOG: Kronos cache check failed — {exc}")
+
+    async def _candle_logger_loop(self) -> None:
+        """Logs regime features + BTC direction at every 15-min candle close."""
+        last_logged_ts = None
+        while self._running:
+            try:
+                await asyncio.sleep(30)
+                df15 = self._store.get_ohlcv("15min")
+                if df15 is None or len(df15) < 3:
+                    continue
+                # Second-to-last row is the most recently closed candle;
+                # the last row is the in-progress candle — skip it.
+                closed_ts = df15.index[-2]
+                if closed_ts == last_logged_ts:
+                    continue
+                last_logged_ts = closed_ts
+                closed_candle = df15.iloc[-2]
+                btc_direction = 1 if closed_candle["close"] > closed_candle["open"] else 0
+                features, features_stale, deribit_stale = self._fusion.get_features_snapshot()
+                cols = list(_FEATURE_ORDER)
+                vals = [features.get(c) for c in cols]
+                placeholders = ", ".join(["?"] * (5 + len(cols)))
+                col_names = (
+                    "candle_ts, btc_direction, logged_at, features_stale, deribit_stale, "
+                    + ", ".join(cols)
+                )
+                self._db.execute(
+                    f"INSERT OR IGNORE INTO candle_features ({col_names}) VALUES ({placeholders})",
+                    [
+                        closed_ts.isoformat(),
+                        btc_direction,
+                        datetime.utcnow().isoformat(),
+                        int(features_stale),
+                        int(deribit_stale),
+                        *vals,
+                    ],
+                )
+                self._db.commit()
+                logger.info(f"CandleLogger: logged candle {closed_ts} direction={btc_direction}")
+            except Exception as exc:
+                logger.warning(f"CandleLogger: {exc}")
 
     def stop(self) -> None:
         logger.info("KronosV2 stopping")

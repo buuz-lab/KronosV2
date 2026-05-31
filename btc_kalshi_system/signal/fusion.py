@@ -209,6 +209,15 @@ class SignalFusionEngine:
             okx_stale=okx_stale,
         )
 
+    def get_features_snapshot(self) -> tuple[dict, bool, bool]:
+        """
+        Returns (features_dict, features_stale, deribit_stale).
+        Lightweight — reads Redis + OHLCV only; no MC, no calibration, no market context mutation.
+        Safe to call from a background loop.
+        """
+        features, features_stale, deribit_stale, _okx_stale = self._regime_features()
+        return features, features_stale, deribit_stale
+
     def _regime_features(self) -> tuple[dict, bool, bool, bool]:
         """
         Build the 27-feature dict consumed by RegimeModel.get_regime() and the

@@ -4,11 +4,39 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Regime model live as of 2026-05-30 (session 21). Bootstrap mode over — fusion now runs `0.6 × kronos_cal + 0.4 × regime_prob`. Gate 2 in shadow mode. Calibrator in passthrough, 763/883 rows (~2–3 days to auto-retrain threshold).
+**Current focus:** Session 22 complete. `candle_features` table live (logs regime features + `btc_direction` at every 15-min candle close, ~96 rows/day). `scripts/regime_confidence_tracker.py` deployed for Gate 2 shadow analysis. Next: calibrator 883-row retrain (check `python3 scripts/train_calibrator.py --dry-run`), then Gate 2 enforcement decision after ~50 shadow trades.
 
 ---
 
 ## Current Progress
+
+**As of 2026-05-30 session 22: 15-min candle feature logger + regime confidence tracker. Infrastructure for regime label change. 401 tests pass (395 + 6 new).**
+
+**Session 22: candle feature logger + confidence tracker**
+
+**Changes — session 22:**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/signal/fusion.py` | **New `get_features_snapshot()` method** on `SignalFusionEngine`: returns `(features_dict, features_stale, deribit_stale)`. Lightweight wrapper around `_regime_features()` — no MC, no calibration, no market context mutation. Safe to call from background loop. |
+| `main.py` | **Import `_FEATURE_ORDER`** from `regime_model`; **`_CREATE_CANDLE_FEATURES_TABLE`** SQL constant (schema built dynamically from `_FEATURE_ORDER` to stay in sync with 3-file contract); **`_CANDLE_FEATURES_COLUMN_MIGRATIONS = []`** (empty, same pattern as others); **`candle_features` table creation + migration** called in `__init__` after gate_rejections; **`_candle_logger_loop()`** async coroutine (polls every 30s, logs `btc_direction` + regime features at each 15-min candle close, `INSERT OR IGNORE` on `candle_ts` UNIQUE); coroutine added to `asyncio.gather()` in `run()`. |
+| `scripts/regime_confidence_tracker.py` | **New** — 4-section script (modeled on `regime_health_check.py`): overall regime live stats, confidence-stratified accuracy (bins by `ABS(regime_prob - 0.5)`), Gate 2 shadow disagreements detail (high/med/low confidence buckets), candle_features logger health (rows/day, stale counts, date range). `--days N` flag (default 30). |
+| `tests/test_main_candle_logger.py` | **New** — 6 TDD tests: table created on init, row written on new candle, no duplicate on same candle, survives exception, `btc_direction=1` when close > open, `btc_direction=0` when close ≤ open. |
+
+**Why 30s poll interval:** The logger fires within 30s of each 15-min close — acceptable for infrastructure that will accumulate ~672 rows/week. The `last_logged_ts` guard prevents re-logging the same candle within a single run; `INSERT OR IGNORE` on `candle_ts UNIQUE` makes it idempotent across restarts.
+
+**candle_features schema:** `id, candle_ts (UNIQUE), btc_direction, logged_at, features_stale, deribit_stale` + all 28 `_FEATURE_ORDER` columns as REAL. Schema is built dynamically from `_FEATURE_ORDER` so it automatically stays in sync with the 3-file feature order contract.
+
+**`btc_direction = 1 if close > open`** — uses the closed 15-min candle (second-to-last row in the 15-min OHLCV at log time). This is the new regime model v2 training label. The `candle_features` table does NOT feed into any existing training pipeline this session — data collection only.
+
+**Restart required:** `launchctl unload && load` to pick up the new `_candle_logger_loop` and `candle_features` table. First rows will appear within 30s of the next 15-min candle close.
+
+**Next milestones:**
+0. **Calibrator 883-row retrain** (currently ~826 rows, ~1 day away). Run `python3 scripts/train_calibrator.py --dry-run` before allowing save. See memory `project-calibrator-883-retrain`.
+1. **Monitor Gate 2 shadow disagreements.** Run `python3 scripts/regime_confidence_tracker.py` after ~50 trades with `regime_prob IS NOT NULL`. High-confidence calls (> 0.30 from 0.5) should have higher accuracy than low-confidence — if not, dynamic weighting is premature.
+2. **After 7+ days of `candle_features`** (~672 rows): retrain regime model with `btc_direction = close > open` label and drop `kalshi_spread_normalized`. See Future Roadmap — Regime Model v2.
+
+---
 
 **As of 2026-05-30 session 21: Regime model trained and live. Bootstrap mode over. Gate 2 shadow mode. live_monitor shows k15raw + k15cal separately. train_regime.py now includes gate_rejections to fix selection bias.**
 
@@ -39,9 +67,11 @@ Placed trades cleared all gates — they skew toward higher-confidence signals, 
 - Watch logs for `Gate 2 shadow` lines over ~50 trades, then evaluate whether to flip `REGIME_GATE2_ENFORCING=True`
 
 **Next milestones:**
-1. Calibrator auto-retrain at 883 rows (~2–3 days, currently 763). Run `python3 scripts/train_calibrator.py --dry-run` before allowing save.
-2. After ~50 trades under regime model: audit Gate 2 shadow disagreements, decide on `REGIME_GATE2_ENFORCING`.
+0. **(Session 22)** 15-min candle feature logger (`candle_features` table) + `scripts/regime_confidence_tracker.py`. Infrastructure for regime label change — data collection only, no retrain.
+1. **Calibrator auto-retrain at 883 rows (~1 day, currently 826).** Run `python3 scripts/train_calibrator.py --dry-run` before allowing save.
+2. After ~50 trades under regime model: audit Gate 2 shadow disagreements, decide on `REGIME_GATE2_ENFORCING`. Run `python3 scripts/regime_confidence_tracker.py` to see confidence-stratified accuracy.
 3. After calibrator deploys: 2-week clean data window → proper gate audit.
+4. After 7+ days of `candle_features` data (~672 rows): retrain regime model with new label (`btc_direction = close > open`) and drop `kalshi_spread_normalized`. See Future Roadmap.
 
 ---
 
@@ -921,20 +951,26 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Next Steps
 
-**Immediate (this week):**
+**Immediate (next session):**
 
-1. **Watch for 883 combined k15-ready rows — manual retrain check required.** When `python3 scripts/auto_retrain_calibrator.py --dry-run` shows row trigger firing AND min-rows guard passes, do NOT let it run automatically. Run `python3 scripts/train_calibrator.py --dry-run` first and manually compare fitted Brier vs passthrough Brier on the same 300-row window. Only allow save if fitted Brier < passthrough Brier by ≥0.005. See memory `project-calibrator-883-retrain` for exact SQL. **Note:** train/holdout split is now live — the auto-revert guard will correctly catch degraded fits. `_prev_brier` is still potentially stale (reflects 129-row k15 fit baseline, not passthrough) — manual verification is still required once. First deployment will use regime as third feature (`_regime_aware=True`).
+0. **Build 15-min candle feature logger + confidence tracker.** See `docs/session-22-prompt.md` for the full implementation spec. Two deliverables: `candle_features` table in `trades.db` (background coroutine logging regime features at every 15-min close) + `scripts/regime_confidence_tracker.py` (confidence-stratified Gate 2 shadow analysis). No retrain — infrastructure only.
+
+1. **Watch for 883 combined k15-ready rows — manual retrain check required (currently 826, ~1 day away).** When `python3 scripts/auto_retrain_calibrator.py --dry-run` shows row trigger firing AND min-rows guard passes, do NOT let it run automatically. Run `python3 scripts/train_calibrator.py --dry-run` first and manually compare fitted Brier vs passthrough Brier on the same 300-row window. Only allow save if fitted Brier < passthrough Brier by ≥0.005. See memory `project-calibrator-883-retrain` for exact SQL. **Note:** train/holdout split is now live — the auto-revert guard will correctly catch degraded fits. `_prev_brier` is still potentially stale (reflects 129-row k15 fit baseline, not passthrough) — manual verification is still required once. First deployment will use regime as third feature (`_regime_aware=True`).
    - The in-memory 25-resolution refit is also running continuously. Last attempt (07:10 2026-05-30) missed passthrough by only 0.0006 (Brier 0.2433 vs baseline 0.2427). Watch `logs/launchd_stderr.log` for `Calibrator refit: passthrough=False` — that means it auto-deployed a non-passthrough model.
+
+**This week:**
 
 2. **Monitor Gate 5 ranging filter impact.** Track: `SELECT deepseek_regime, failed_gate, COUNT(*) FROM gate_rejections WHERE failed_gate=5 AND DATE(timestamp) >= date('now','-7 days') GROUP BY deepseek_regime`. Win rate on ranging trades passing Gate 5 should move from 47% toward 60%.
 
 3. **Investigate high_uncertainty oversizing.** −$0.84/trade at 51% win rate means Kelly is ignoring something. Check whether high_uncertainty fills are systematically at unfavorable prices (spread eating edge). Query: `SELECT AVG(fill_price_cents), AVG(pnl_dollars) FROM trades WHERE deepseek_regime='high_uncertainty' AND outcome IS NOT NULL`.
 
-**Medium-term (~4–6 weeks):**
+4. **After ~50 Gate 2 shadow trades: run `python3 scripts/regime_confidence_tracker.py`.** Check whether high-confidence regime calls (ABS(regime_prob - 0.5) > 0.2) have meaningfully higher accuracy. If not, dynamic weighting is premature — wait for more data. If yes, see Future Roadmap for dynamic weighting plan.
 
-4. **Train regime model when clean rows ≥ 500.** `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL AND features_stale=0 AND deribit_stale=0 AND atm_iv IS NOT NULL`. Run `python3 scripts/train_regime.py --dry-run` first. Deploy in shadow mode (REGIME_GATE2_ENFORCING=false), observe ~50 trades, then enforce.
+**Medium-term (~1–2 weeks after candle_features has 7+ days of data):**
 
-5. **Segmented calibrators after regime model is deployed.** Full separate calibrators per regime (Phase 3b). Higher accuracy ceiling than the current regime-as-feature model, but needs ~500 rows per regime. Ranging will hit that first (~August). trending_up/down may never have enough rows — those stay on global.
+5. **Retrain regime model with new label + drop `kalshi_spread_normalized`.** Prerequisites: `SELECT COUNT(*) FROM candle_features` ≥ 672 (7 days × 96/day). See Future Roadmap — Regime Model v2 section for full spec. Do both changes in one retrain.
+
+6. **Segmented calibrators after regime model v2 is deployed.** Full separate calibrators per regime (Phase 3b). Higher accuracy ceiling than the current regime-as-feature model, but needs ~500 rows per regime. Ranging will hit that first (~August). trending_up/down may never have enough rows — those stay on global.
 
 ---
 
@@ -1154,6 +1190,16 @@ With the background loop, the 23s per run stops being on the critical path entir
 
 - **Feed health check:** `redis-cli ttl regime:features` should return 400–600. If -2, feed is down. `redis-cli get regime:features:lkg` shows LKG age via `_lkg_written_at` field.
 
+- **`candle_features` table is data-collection only.** It does NOT feed into any existing training pipeline. It logs regime features + `btc_direction` at every 15-min candle close to enable the future regime label change. The `btc_direction` column there is `1 if close > open` on the BRTI 15-min candle — independent of any Kronos signal. Do not use it for calibrator training (calibrator uses `kronos_raw_15min` + outcome, not `btc_direction`).
+
+- **`candle_features.candle_ts` is the open timestamp of the just-closed candle** (second-to-last row in 15-min OHLCV at log time), not the current time. The `UNIQUE` constraint on `candle_ts` makes writes idempotent — `INSERT OR IGNORE` is required.
+
+- **Regime model v1 label is circular.** `direction == outcome` = "did Kronos get it right?" Training features include `kalshi_implied_prob` at 19% importance, meaning the model largely learned "when does Kalshi agree with Kronos?" This is partially circular — Gate 8 already captures that. Do NOT treat the v1 regime model as a fully independent signal. The v2 retrain (new label: `btc_direction = close > open`) fixes this by making the model a BTC direction predictor, not a Kronos-success predictor.
+
+- **`kalshi_spread_normalized` is a dead feature in training.** It has near-zero variance (range 0.00–0.02¢) in the training dataset, giving it 0.000 importance in the v1 model. It IS populated in live inference (0.01–0.02), but this has no effect since the model ignores it. Drop it from `_FEATURE_ORDER` in the v2 retrain (3-file contract: `regime_model.py`, `train_regime.py`, `fusion._regime_features()`). The feature column stays in the DB schemas for backward compatibility.
+
+- **Dynamic weighting and hybrid Kelly are gated on real disagreement data.** Do NOT implement before `python3 scripts/regime_confidence_tracker.py` shows 50+ Gate 2 shadow trades AND high-confidence regime calls have meaningfully higher accuracy than low-confidence ones. Implementing before that has no empirical basis.
+
 ---
 
 ## Future Roadmap
@@ -1175,7 +1221,7 @@ Ordered by data requirements. Each item has a clear trigger condition before imp
 - ✅ Regime-aware calibrator: `[raw, raw², regime_score]` feature vector; `trending_up=1.0`, `trending_down=-1.0`, `ranging=0.0`; first deployment activates at 883 rows
 
 **Current state:**
-- **Calibrator currently passthrough (identity)** — 683 combined rows as of 2026-05-30, need 883 before external retrain. At ~50 k15-ready rows/day, ETA ~4 days.
+- **Calibrator currently passthrough (identity)** — 826 combined rows as of 2026-05-30, need 883 before external retrain (~1 day). At ~50 k15-ready rows/day, ETA ~1 day.
 - In-memory 25-resolution refit running continuously; last attempt (07:10 2026-05-30) missed passthrough threshold by 0.0006 (Brier 0.2433 vs baseline 0.2427)
 - Emergency trigger dormant (no Brier baseline while passthrough)
 
@@ -1184,10 +1230,47 @@ Ordered by data requirements. Each item has a clear trigger condition before imp
 
 **Before next retrain:** manually compare fitted Brier vs passthrough Brier. See memory `project-calibrator-883-retrain`. Do NOT rely on `_prev_brier` auto-revert guard (stale from 129-row fit).
 
-### Phase 2 — Regime model trains (~early July)
+### Phase 1b — Regime model v2 with clean label (~1–2 weeks, after candle_features has 7+ days)
+
+**Context:** The current regime model (v1, session 21) was trained with label `direction == outcome` — "did Kronos get it right?" That label has two problems:
+1. **Circular:** `kalshi_implied_prob` is the #1 feature at 19% importance. The model is largely learning "when does Kalshi agree with Kronos?" — which is already captured by Gate 8. Kronos's job is to find edge *against* the market price, so using market price as a primary training signal is self-defeating.
+2. **Noisy:** Current label is coin-flip at the dataset level (320/657 trades right, 498/984 gate rejections right). The model can't learn much from a 50/50 label on 1099 rows.
+
+**New label:** `btc_direction = 1 if 15-min candle close > open else 0`. Clean ground truth. The regime model becomes a BTC direction predictor, not a "Kronos success" predictor.
+
+**Why this requires `candle_features` first:** The "10× data multiplier" only materializes if features are logged at every 15-min candle boundary. Without the logger (session 22), you're retraining on the same 1099 trade/rejection rows with a different label — no data gain. With 7 days of `candle_features`, you have ~672 rows of clean labeled data independent of trade frequency.
+
+**Retrain spec (do both changes in one retrain):**
+1. **New training source:** `SELECT * FROM candle_features WHERE btc_direction IS NOT NULL` (plus optionally gate_rejections/trades with `btc_direction` derived from their outcome). Query trigger: `SELECT COUNT(*) FROM candle_features` ≥ 672.
+2. **Drop `kalshi_spread_normalized`:** Zero importance in v1 (near-zero variance range 0.00–0.02¢). Remove from `_FEATURE_ORDER` in 3 files (`regime_model.py`, `train_regime.py`, `fusion._regime_features()`). Model shrinks from 27 → 26 features. The 3-file feature order contract test will catch any missed file. **Note:** the feature column still exists in `candle_features` and `gate_rejections` tables — just stop including it in the feature vector.
+3. **Run `python3 scripts/train_regime.py --dry-run` first.** Expect: Brier < 0.25, accuracy > 60%, `kalshi_implied_prob` importance should drop significantly (no longer circular — it's now input to a BTC direction model, not a Kronos-success predictor).
+4. Deploy in shadow mode. The Gate 2 disagreement rate may increase because the model is now genuinely independent of Kronos. That's fine — collect data before enforcing.
+
+**What NOT to do yet:**
+- Do NOT add `kronos_raw_15min`/`kronos_raw` as regime features. Not enough k15 rows per regime to be meaningful.
+- Do NOT implement dynamic weighting or hybrid Kelly until confidence-stratified accuracy data exists (~50+ Gate 2 shadow trades).
+
+### Phase 2 — Dynamic weighting + hybrid Kelly (after 50+ Gate 2 shadow trades)
+
+**Trigger:** `python3 scripts/regime_confidence_tracker.py` shows high-confidence regime calls (ABS(regime_prob - 0.5) > 0.2) have meaningfully higher accuracy than low-confidence calls.
+
+**Dynamic weighting** (replaces flat 60/40 fusion split):
+- Scale regime weight by `ABS(regime_prob - 0.5)`. At conf=0.9 → go 50/50; at conf=0.1 → go 75/25 (regime nearly ignored).
+- Formula: `regime_weight = 0.4 * min(ABS(regime_prob - 0.5) / 0.3, 1.0)` (scales linearly from 0 at no-confidence to 0.4 at full confidence). Adjust constants after seeing real confidence distribution.
+- Change is in `fusion.py` signal computation only. Single-line change, but requires validation.
+- Do NOT implement until confidence-stratified accuracy data confirms the premise.
+
+**Hybrid Kelly on disagreements** (reduces downside on uncertain disagreements):
+- When Gate 2 is shadow mode and `regime_prob` disagrees with Kronos direction AND `ABS(regime_prob - 0.5) > 0.2` (high confidence): cut Kelly to 50%.
+- Implementation: add `regime_confidence = ABS(signal.regime_prob - 0.5)` check in `pretrade_checklist.py`; if disagreement AND confidence > 0.2, multiply `kelly_dollars *= 0.5` before the sizing chain.
+- This is the Gate 10 planning item already noted in the handoff. Don't implement before Gate 2 has 50+ shadow trades.
+- **Note:** Gate 2 enforcing (`REGIME_GATE2_ENFORCING=True`) is a hard block. Hybrid Kelly is a softer version — block only at high confidence, reduce at medium, pass at low. Use hybrid Kelly first; flip to enforcing only if hybrid Kelly data shows high-confidence disagreements are strong negative-EV.
+
+### Phase 3 — Regime model trains (~early July, after Phase 1b retrain)
 **Trigger:** `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL AND features_stale=0 AND deribit_stale=0 AND atm_iv IS NOT NULL` ≥ 500.
 
-- Run `python3 scripts/train_regime.py --dry-run`. Check Brier < 0.25 and feature importances make sense (funding_rate, cvd_normalized, brti_momentum should rank high).
+- This is the *deribit-clean* retrain — Phase 1b uses the new label but may still include rows with `deribit_stale=1`. This phase uses the full 27-feature (or 26 after dropping `kalshi_spread_normalized`) clean dataset.
+- Run `python3 scripts/train_regime.py --dry-run`. Check Brier < 0.25 and feature importances make sense (funding_rate, cvd_normalized, brti_momentum should rank high; `kalshi_implied_prob` should be lower than 19% with the new clean label).
 - Deploy in shadow mode (REGIME_GATE2_ENFORCING=false). Observe ~50 trades. Gate 2 disagreement rate should be < 35% — if higher, the model is noisy and needs more data before enforcing.
 - Once enforcing, the 0.4 regime weight in fusion.py becomes real. Expect calibrated_prob distribution to widen slightly.
 - Add `kronos_raw_15min` and `kronos_raw` as features 29–30 in the NEXT retrain after this one (not this one — too soon, not enough k15 rows per regime to be meaningful).
@@ -1232,3 +1315,5 @@ These don't require implementation — just monitoring queries to run weekly:
 | high_uncertainty P&L | `SELECT AVG(pnl_dollars) FROM trades WHERE deepseek_regime='high_uncertainty' AND outcome IS NOT NULL AND DATE(timestamp) >= date('now','-14 days')` | If still < −0.50/trade after calibrator activates, consider suppressing regime entirely |
 | Gate 2 shadow disagreement | `SELECT COUNT(*) FROM trades WHERE regime_prob IS NOT NULL AND ((direction=1 AND regime_prob < 0.5) OR (direction=0 AND regime_prob >= 0.5))` | If > 40% after regime model deploys, do not enforce Gate 2 yet |
 | k15 calibration health | `python3 scripts/train_calibrator.py --dry-run` | Run weekly once calibrator is active; Brier should trend downward |
+| Candle features logger health | `python3 scripts/regime_confidence_tracker.py` | Check rows logged last 24h ≈ 96; check `btc_direction` split is not wildly skewed |
+| Regime confidence stratification | `python3 scripts/regime_confidence_tracker.py` | After 50+ trades with regime_prob: high-confidence calls (>0.70) should have higher accuracy than low-confidence (<0.60) — if not, dynamic weighting is premature |
