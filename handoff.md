@@ -10,18 +10,19 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
-**As of 2026-05-31 session 23: Gate 11 + regime weight 0.4→0.2 + disagreement neutralization. 407 tests pass (395 + 12 new).**
+**As of 2026-05-31 session 23: Gate 11 + regime weight 0.4→0.2 + disagreement neutralization + router test fixes. 409 tests pass (395 + 14 new/fixed). ✅ Committed d229d1c. ✅ Service restarted.**
 
-**Session 23: Gate 11, regime weight, disagreement neutralization**
+**Session 23: Gate 11, regime weight, disagreement neutralization, router test fixes**
 
 **Changes — session 23:**
 
-| File | Change |
-|------|--------|
-| `btc_kalshi_system/execution/pretrade_checklist.py` | **Gate 11** (new): blocks YES trades where `kronos_calibrated > 0.75` AND `trade_price_cents < 45`. Post-May-26 data shows 15% win rate on 13 trades in this zone. Placed after Gate 2a (price floor), before Kelly computation. Constants `_OVERCONFIDENCE_K_CAL_FLOOR=0.75` and `_OVERCONFIDENCE_MAX_FILL_CENTS=45` defined locally inside `run()`. Only applies to direction=1 (YES). |
-| `btc_kalshi_system/signal/fusion.py` | **Regime weight 0.4→0.2**: `_KRONOS_WEIGHT=0.8`, `_REGIME_WEIGHT=0.2`. Regime model v1 has circular label (`direction==outcome`; `kalshi_implied_prob` is #1 feature at 19%). Restore to 0.4 after regime v2 retrains. **Disagreement neutralization**: when `kronos_cal` and `regime_prob` are on opposite sides of 0.5, `_regime_in_fusion=0.5` (neutral) is used in the fusion formula instead of raw `regime_prob`. On agreement days regime is fully preserved. Gate 2 warning still logs raw `regime_prob`; `TradingSignal.regime_prob` stores raw value. Remove neutralization after regime v2 validates. |
-| `tests/execution/test_pretrade_checklist.py` | **4 new Gate 11 tests**: `test_gate11_fires_high_kcal_low_fill_yes`, `test_gate11_does_not_fire_high_fill`, `test_gate11_does_not_fire_low_kcal`, `test_gate11_does_not_fire_no_direction`. **3 existing tests updated**: `test_gate2_depth_capped_to_available` and 2 Gate 8 regression tests moved from 29¢ → 50¢ fills (Gate 11 correctly blocks the 29¢ high-confidence scenario). |
-| `tests/signal/test_fusion.py` | **5 tests updated** for new weights (0.8/0.2). **1 test updated** for neutralization: `test_gate2_shadow_mode_does_not_block` expected changed from `0.62` → `0.66` (regime neutralized on disagreement). **4 new neutralization tests**: `test_disagreement_neutralization_bullish_kronos_bearish_regime`, `test_disagreement_neutralization_bearish_kronos_bullish_regime`, `test_disagreement_neutralization_does_not_fire_on_agreement_bullish`, `test_disagreement_neutralization_does_not_fire_on_agreement_bearish`. |
+| File | Change | Status |
+|------|--------|--------|
+| `btc_kalshi_system/execution/pretrade_checklist.py` | **Gate 11** (new): blocks YES trades where `kronos_calibrated > 0.75` AND `trade_price_cents < 45`. Post-May-26 data shows 15% win rate on 13 trades in this zone. Placed after Gate 2a (price floor), before Kelly computation. Constants `_OVERCONFIDENCE_K_CAL_FLOOR=0.75` and `_OVERCONFIDENCE_MAX_FILL_CENTS=45` defined locally inside `run()`. Only applies to direction=1 (YES). | ✅ |
+| `btc_kalshi_system/signal/fusion.py` | **Regime weight 0.4→0.2**: `_KRONOS_WEIGHT=0.8`, `_REGIME_WEIGHT=0.2`. Regime model v1 has circular label (`direction==outcome`; `kalshi_implied_prob` is #1 feature at 19%). Restore to 0.4 after regime v2 retrains. **Disagreement neutralization**: when `kronos_cal` and `regime_prob` are on opposite sides of 0.5, `_regime_in_fusion=0.5` (neutral) is used in the fusion formula instead of raw `regime_prob`. On agreement days regime is fully preserved. Gate 2 warning still logs raw `regime_prob`; `TradingSignal.regime_prob` stores raw value. Remove neutralization after regime v2 validates. | ✅ |
+| `tests/execution/test_pretrade_checklist.py` | **4 new Gate 11 tests**: `test_gate11_fires_high_kcal_low_fill_yes`, `test_gate11_does_not_fire_high_fill`, `test_gate11_does_not_fire_low_kcal`, `test_gate11_does_not_fire_no_direction`. **3 existing tests updated**: `test_gate2_depth_capped_to_available` and 2 Gate 8 regression tests moved from 29¢ → 50¢ fills (Gate 11 correctly blocks the 29¢ high-confidence scenario). | ✅ |
+| `tests/signal/test_fusion.py` | **5 tests updated** for new weights (0.8/0.2). **1 test updated** for neutralization: `test_gate2_shadow_mode_does_not_block` expected changed from `0.62` → `0.66` (regime neutralized on disagreement). **4 new neutralization tests**: `test_disagreement_neutralization_bullish_kronos_bearish_regime`, `test_disagreement_neutralization_bearish_kronos_bullish_regime`, `test_disagreement_neutralization_does_not_fire_on_agreement_bullish`, `test_disagreement_neutralization_does_not_fire_on_agreement_bearish`. | ✅ |
+| `tests/execution/test_router.py` | **2 stale BOTH_FAILED tests fixed**: `test_both_failed_raises_runtime_error` and `test_both_failed_does_not_call_raw` now set `_last_recovery_attempt = time.time()` to suppress the BOTH_FAILED→FALLBACK recovery transition that was silently eating the expected RuntimeError. Pre-existing failures since the session 21 router recovery commit. | ✅ |
 
 **Gate 11 detail:**
 - Fires when: `direction == 1 AND kronos_calibrated > 0.75 AND trade_price_cents < 45`
